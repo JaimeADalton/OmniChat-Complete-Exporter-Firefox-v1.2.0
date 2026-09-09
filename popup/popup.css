@@ -1,0 +1,30 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: Canvas;
+  color: CanvasText;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 390px; max-width: 440px; }
+main { padding: 16px; }
+header { margin-bottom: 14px; }
+.brand-row { display: flex; gap: 10px; align-items: center; }
+h1 { margin: 0; font-size: 16px; line-height: 1.3; }
+header p { margin: 3px 0 0; font-size: 12px; opacity: .72; max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.summary { display: grid; grid-template-columns: repeat(4,1fr); gap: 6px; margin: 0 0 14px; }
+.summary div { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 9px; padding: 8px 4px; text-align: center; }
+.summary strong { display: block; font-size: 17px; }
+.summary span { display: block; margin-top: 2px; font-size: 9.5px; line-height: 1.2; opacity: .7; }
+.options { display: grid; gap: 9px; }
+.check { display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: start; font-size: 12px; line-height: 1.35; }
+.check input { margin: 2px 0 0; }
+.field { display: grid; gap: 5px; margin-top: 3px; font-size: 12px; font-weight: 600; }
+select { width: 100%; padding: 8px 9px; border-radius: 7px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); background: Canvas; color: CanvasText; }
+.notice { margin-top: 12px; padding: 9px 10px; border-radius: 8px; background: color-mix(in srgb, CanvasText 7%, transparent); font-size: 11px; line-height: 1.35; }
+.actions { display: grid; grid-template-columns: 1fr 1.8fr; gap: 8px; margin-top: 13px; }
+button { border: 0; border-radius: 8px; padding: 9px 11px; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+button:disabled { opacity: .55; cursor: default; }
+.primary { background: #1b6ef3; color: white; }
+.secondary { background: color-mix(in srgb, CanvasText 10%, transparent); color: CanvasText; }
+.status { min-height: 16px; margin: 8px 2px 0; font-size: 11px; line-height: 1.35; opacity: .82; }
+.status.error { color: #c33; opacity: 1; }

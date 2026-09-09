@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "OmniChat Complete Exporter",
+  "version": "1.2.0",
+  "description": "Exporta conversaciones completas de ChatGPT y Claude, incluyendo turnos virtualizados, actividad visible, herramientas, código, comandos, imágenes, archivos, capturas visuales de respaldo y DOM saneado.",
+  "permissions": [
+    "storage",
+    "downloads",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://claude.ai/*",
+    "https://*.openai.com/*",
+    "https://*.oaiusercontent.com/*",
+    "https://*.oaistatic.com/*",
+    "https://*.anthropic.com/*",
+    "https://*.claude.ai/*"
+  ],
+  "action": {
+    "default_title": "OmniChat Complete Exporter",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "48": "icons/icon-48.png",
+      "96": "icons/icon-96.png"
+    }
+  },
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "css": [
+        "content/content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "omnichat-complete-exporter@local.oai",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
+  "background": {
+    "scripts": [
+      "background/background.js"
+    ]
+  }
+}

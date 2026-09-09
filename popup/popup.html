@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OmniChat Complete Exporter</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand-row">
+        <img src="../icons/icon-48.png" alt="" width="32" height="32">
+        <div>
+          <h1>OmniChat Complete Exporter</h1>
+          <p id="platformLabel">Analizando conversación…</p>
+        </div>
+      </div>
+    </header>
+
+    <section class="summary" aria-label="Resumen">
+      <div><strong id="turnCount">—</strong><span>turnos</span></div>
+      <div><strong id="codeCount">—</strong><span>bloques de código</span></div>
+      <div><strong id="mediaCount">—</strong><span>medios/archivos</span></div>
+      <div><strong id="toolCount">—</strong><span>ejecuciones</span></div>
+    </section>
+
+    <section class="options">
+      <label class="check"><input id="deepScan" type="checkbox" checked><span>Escaneo profundo (recorre la conversación para cargar contenido antiguo)</span></label>
+      <label class="check"><input id="expandCollapsed" type="checkbox" checked><span>Abrir temporalmente paneles plegados y restaurarlos al terminar</span></label>
+      <label class="check"><input id="archiveAssets" type="checkbox" checked><span>Archivar imágenes y medios accesibles</span></label>
+      <label class="check"><input id="archiveFiles" type="checkbox" checked><span>Archivar archivos enlazados cuando sean accesibles</span></label>
+      <label class="check"><input id="rawDom" type="checkbox" checked><span>Incluir instantánea DOM saneada de cada turno</span></label>
+      <label class="check"><input id="eventLog" type="checkbox" checked><span>Incluir actividad detectada mientras la extensión está activa</span></label>
+      <label class="check"><input id="visualEvidence" type="checkbox" checked><span>Guardar capturas visuales de respaldo durante el recorrido (solo ZIP; puede aumentar el tamaño)</span></label>
+
+      <label class="field">
+        <span>Formato</span>
+        <select id="format">
+          <option value="zip" selected>ZIP completo (recomendado)</option>
+          <option value="html">HTML autónomo</option>
+          <option value="json">JSON estructurado</option>
+          <option value="markdown">Markdown</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span>Límite total para recursos archivados</span>
+        <select id="assetLimitMb">
+          <option value="50">50 MB</option>
+          <option value="200" selected>200 MB</option>
+          <option value="500">500 MB</option>
+          <option value="1000">1 GB</option>
+        </select>
+      </label>
+    </section>
+
+    <div id="notice" class="notice" role="status">Todo el procesamiento se realiza localmente en el navegador. La extensión no sube el contenido a servidores externos.</div>
+
+    <div class="actions">
+      <button id="refresh" class="secondary" type="button">Reanalizar</button>
+      <button id="export" class="primary" type="button">Exportar conversación</button>
+    </div>
+
+    <p id="status" class="status" aria-live="polite"></p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

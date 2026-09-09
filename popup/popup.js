@@ -1,0 +1,95 @@
+const $ = (id) => document.getElementById(id);
+const optionIds = ["deepScan", "expandCollapsed", "archiveAssets", "archiveFiles", "rawDom", "eventLog", "visualEvidence", "format", "assetLimitMb"];
+
+async function activeTab() {
+  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+  return tabs[0];
+}
+
+function setStatus(text, isError = false) {
+  $("status").textContent = text || "";
+  $("status").classList.toggle("error", isError);
+}
+
+async function restoreOptions() {
+  const saved = await browser.storage.local.get("omnichatOptions");
+  if (!saved.omnichatOptions) return;
+  for (const id of optionIds) {
+    if (!(id in saved.omnichatOptions)) continue;
+    const el = $(id);
+    if (el.type === "checkbox") el.checked = Boolean(saved.omnichatOptions[id]);
+    else el.value = String(saved.omnichatOptions[id]);
+  }
+}
+
+function optionsFromForm() {
+  return {
+    deepScan: $("deepScan").checked,
+    expandCollapsed: $("expandCollapsed").checked,
+    archiveAssets: $("archiveAssets").checked,
+    archiveFiles: $("archiveFiles").checked,
+    rawDom: $("rawDom").checked,
+    eventLog: $("eventLog").checked,
+    visualEvidence: $("visualEvidence").checked,
+    format: $("format").value,
+    assetLimitMb: Number($("assetLimitMb").value) || 200
+  };
+}
+
+async function send(message) {
+  const tab = await activeTab();
+  if (!tab?.id) throw new Error("No se encontró una pestaña activa.");
+  return browser.tabs.sendMessage(tab.id, message);
+}
+
+async function refreshSummary() {
+  setStatus("Analizando…");
+  try {
+    const data = await send({ type: "OMNICHAT_GET_SUMMARY" });
+    if (!data?.ok) throw new Error(data?.error || "No se pudo analizar la conversación.");
+    $("platformLabel").textContent = `${data.platformLabel} · ${data.title || "Conversación sin título"}`;
+    $("turnCount").textContent = data.turns;
+    $("codeCount").textContent = data.codeBlocks;
+    $("mediaCount").textContent = data.media + data.files;
+    $("toolCount").textContent = data.toolExecutions ?? 0;
+    if (!data.turns) {
+      setStatus("No se detectaron turnos todavía. Si acabas de instalar la extensión, recarga esta conversación.", true);
+    } else if (Number.isFinite(data.mountedTurns) && data.mountedTurns < data.turns) {
+      setStatus(`Listo: ${data.turns} turnos detectados (${data.mountedTurns} montados ahora). El escaneo profundo recorrerá los demás.`);
+    } else {
+      setStatus("Listo para exportar.");
+    }
+  } catch (error) {
+    $("platformLabel").textContent = "ChatGPT / Claude";
+    setStatus("No puedo acceder a esta pestaña. Abre una conversación compatible y recárgala después de instalar la extensión.", true);
+  }
+}
+
+async function startExport() {
+  const options = optionsFromForm();
+  await browser.storage.local.set({ omnichatOptions: options });
+  $("export").disabled = true;
+  $("refresh").disabled = true;
+  setStatus("Exportando. El progreso aparece también dentro de la página…");
+  try {
+    const result = await send({ type: "OMNICHAT_EXPORT", options });
+    if (!result?.ok) throw new Error(result?.error || "La exportación falló.");
+    const warningText = result.warnings ? ` Advertencias: ${result.warnings}.` : "";
+    setStatus(`Exportación creada: ${result.filename}.${warningText}`);
+  } catch (error) {
+    setStatus(`Error: ${error.message || error}`, true);
+  } finally {
+    $("export").disabled = false;
+    $("refresh").disabled = false;
+  }
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+  await restoreOptions();
+  await refreshSummary();
+  $("refresh").addEventListener("click", refreshSummary);
+  $("export").addEventListener("click", startExport);
+  for (const id of optionIds) {
+    $(id).addEventListener("change", () => browser.storage.local.set({ omnichatOptions: optionsFromForm() }));
+  }
+});
