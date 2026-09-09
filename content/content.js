@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.3.1";
+  const VERSION = "1.3.2";
   const SCHEMA_VERSION = "1.3";
   const MAX_LIVE_EVENTS = 1000;
   const MAX_SCAN_STEPS = 320;
@@ -30,6 +30,7 @@
     cancelled: false,
     navigationKey: location.origin + location.pathname,
     visualCoverage: [],
+    traversalPasses: [],
     diagnostics: [],
     phase: "idle",
     lastFailure: null
@@ -251,13 +252,14 @@
 
   function chatGptTurns() {
     const shells = chatGptPersistentShells();
-    if (shells.length) return shells;
-
-    const articles = dedupeElements([...document.querySelectorAll('article[data-turn="user"], article[data-turn="assistant"]')]);
-    if (articles.length) return articles;
-
-    const roles = dedupeElements([...document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')]);
-    return dedupeElements(roles.map((el) => el.closest('section[data-testid^="conversation-turn-"], article[data-testid^="conversation-turn-"], article[data-turn], section[data-turn]') || el));
+    // A mounted message may temporarily have no persistent section. Include these
+    // siblings as well as shells; a successful shell selector is not a full census.
+    const others = dedupeElements([
+      ...document.querySelectorAll('article[data-turn="user"], article[data-turn="assistant"]'),
+      ...document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')
+    ]).filter(node => !shells.some(shell => shell === node || shell.contains(node)));
+    const roots = others.filter(node => !others.some(parent => parent !== node && parent.contains(node)));
+    return dedupeElements([...shells, ...roots]);
   }
 
   function claudeTurns() {
@@ -556,7 +558,7 @@
       if (!text || text.length > 200000) continue;
       if (node.matches("button[aria-expanded]")) {
         const normalized = cleanText(`${node.getAttribute("aria-label") || ""} ${text}`).toLowerCase();
-        if (/\b(copy|copiar|share|compartir|switch model|cambiar modelo|more actions|más acciones|open image|abrir imagen|download|descargar|edit message|editar mensaje|show more|show less)\b/i.test(normalized)) continue;
+        if (/\b(copy|copiar|share|compartir|switch model|cambiar modelo|more actions|más acciones|open image|abrir imagen|download|descargar|edit message|editar mensaje|show more|show less|pro feedback|feedback|valorar)\b/i.test(normalized)) continue;
       }
       const type = node.matches("button[aria-expanded],details > summary") ? "expandable" :
         node.matches("[role='status'],[aria-live]") ? "status" : "tool_or_activity";
@@ -632,12 +634,21 @@
   function isLikelyFileLink(a, href) {
     if (!href || /^(?:javascript|vbscript):/i.test(href)) return false;
     if (a.hasAttribute('download')) return true;
+    if (/^(?:sandbox:|blob:)/i.test(href)) return true;
     try {
       const u = new URL(href);
-      if ((u.hostname==='github.com' && /\/(?:blob|tree)\//.test(u.pathname)) || u.hostname==='gist.github.com') return false;
-      if (a.closest('[data-testid*="citation"]')) return false;
-    } catch { /* sandbox: and blob: may not have a web host */ }
-    return /^(?:sandbox:|blob:)/.test(href) || FILE_EXT_RE.test(href);
+      if ((u.hostname === 'github.com' && /\/(?:blob|tree)\//.test(u.pathname)) || u.hostname === 'gist.github.com') return false;
+      if (a.closest('[data-testid*="citation"], [data-testid*="search-result"], [data-citation]')) return false;
+      // .html is the ordinary suffix of a web page. Keep it as a link unless
+      // there is explicit attachment evidence; generated sandbox HTML is above.
+      const name = decodeURIComponent(u.pathname.split('/').pop() || '');
+      if (/\.html?$/i.test(name)) {
+        const trusted = /^(?:chatgpt\.com|chat\.openai\.com|claude\.ai)$/.test(u.hostname);
+        const attachment = a.closest('[data-testid*="attachment"], [data-testid*="file-download"], [class*="group/file-tile"], [class*="group/artifact-row"]');
+        return Boolean(trusted && attachment);
+      }
+    } catch { return false; }
+    return FILE_EXT_RE.test(href);
   }
 
   function extractUiFileTiles(el) {
@@ -1516,6 +1527,8 @@
       return true;
     } catch (error) {
       console.warn("OmniChat: no se pudo capturar un turno", error);
+      state.diagnostics.push({kind:'turn-snapshot-error', turnId:stableTurnId(el),
+        message:diagnosticText(error?.message || String(error), 400)});
       return false;
     }
   }
@@ -1587,6 +1600,7 @@
     if (!turn?.isConnected || state.visualSnapshots.length >= MAX_VISUAL_SNAPSHOTS) return 0;
     const scroller = findScrollContainer();
     let captured = 0;
+    let reachedBottom = false;
 
     // Reserva capacidad para que los turnos posteriores reciban al menos una captura
     // cuando el total cabe dentro del presupuesto global. Así un turno muy largo no
@@ -1616,7 +1630,8 @@
 
       const rect = turn.getBoundingClientRect();
       const viewportBottom = Math.max(1, Math.min(innerHeight || metrics.viewport, metrics.viewport));
-      if (rect.bottom <= viewportBottom - 24) break;
+      reachedBottom = rect.bottom <= viewportBottom - 24;
+      if (reachedBottom || tile === perTurnLimit) break;
 
       const before = metrics.top;
       const advance = Math.max(320, Math.floor(metrics.viewport * 0.78));
@@ -1625,10 +1640,7 @@
       const after = scrollMetrics(scroller).top;
       if (Math.abs(after - before) < 2) break;
     }
-    const finalRect=turn.getBoundingClientRect();
-    const reachedBottom=finalRect.bottom <= innerHeight-24;
     state.visualCoverage.push({turnId:stableTurnId(turn),captures:captured,reachedBottom,limited:!reachedBottom,innerScrollAreasFullyCaptured:false});
-    if(!reachedBottom) warnings.push(`Capturas parciales del turno ${ordinal}: se alcanzó el presupuesto o no se pudo continuar. El texto DOM se conserva por separado.`);
     return captured;
   }
 
@@ -1638,6 +1650,83 @@
     return index === 0 || index === total - 1 || index % stride === 0;
   }
 
+  function turnContinuity(turns) {
+    const hints = [...new Set(turns.map(t => t.orderHint).filter(Number.isInteger))].sort((a,b)=>a-b);
+    const missing = [];
+    if (hints.length > 1 && hints[hints.length-1] - hints[0] < 100000) {
+      const present = new Set(hints);
+      for (let i=hints[0]; i<=hints[hints.length-1]; i++) if (!present.has(i)) missing.push(i);
+    }
+    return {basis:'observed_DOM_order_indices', observedOrderHints:hints,
+      missingOrderHints:missing, capturedTurns:turns.length,
+      status:!hints.length?'indices_unavailable':missing.length?'gaps_detected':'no_internal_gaps_observed',
+      expectedTotal:null, completeConversationVerified:false,
+      limitations:'Indices cannot establish missing leading/trailing messages, unloaded panels, or the full active branch.'};
+  }
+
+  function mergeEvictedInto(map, orderMap, nextOrderRef) {
+    for (const snapshot of state.evictedTurns.values()) {
+      if (snapshot.text || snapshot.files?.length || snapshot.media?.length || snapshot.codeBlocks?.length)
+        mergeSnapshot(map, snapshot, orderMap, nextOrderRef);
+    }
+  }
+
+  async function captureWindowSweep(map, options, warnings, orderMap, nextOrderRef) {
+    const scroller = findScrollContainer();
+    const savedTop = Number(scroller.scrollTop || 0);
+    let steps=0, stableBottom=0, stalled=0, reachedBottom=false;
+    let lastBottomSignature='';
+    try {
+      toast('OmniChat: inventariando conversación', 'Recorriendo mensajes cortos y ventanas virtualizadas…');
+      await settleAtTop(scroller);
+      while (steps < MAX_SCAN_STEPS) {
+        checkCancelled();
+        await captureCurrentInto(map, options, orderMap, nextOrderRef);
+        mergeEvictedInto(map, orderMap, nextOrderRef);
+        steps++;
+        const m=scrollMetrics(scroller), bottom=Math.max(0,m.height-m.viewport);
+        const signature=`${Math.round(m.height)}:${map.size}`;
+        toast('OmniChat: inventariando conversación', `${map.size} turnos conservados · paso ${steps}`);
+        if (m.top>=bottom-4) {
+          stableBottom=signature===lastBottomSignature?stableBottom+1:0;
+          lastBottomSignature=signature;
+          if (stableBottom>=2) {reachedBottom=true;break;}
+          await wait(180); continue;
+        }
+        stableBottom=0;
+        // Small overlapping advances reach short messages between tall turns.
+        const advance=Math.max(80, Math.floor(m.viewport*0.65));
+        setScrollTop(scroller, Math.min(bottom, m.top+advance));
+        await wait(120);
+        const after=scrollMetrics(scroller).top;
+        if (Math.abs(after-m.top)<2) stalled++; else stalled=0;
+        if (stalled>=4) break;
+      }
+      await captureCurrentInto(map, options, orderMap, nextOrderRef);
+      mergeEvictedInto(map, orderMap, nextOrderRef);
+    } finally {
+      setScrollTop(scroller,savedTop);
+    }
+    const result={kind:'mounted-window-sweep',steps,capturedTurns:map.size,reachedBottom,
+      limitReached:steps>=MAX_SCAN_STEPS,stalled:stalled>=4,disclosuresClicked:0};
+    state.traversalPasses.push(result);
+    state.diagnostics.push(result);
+    if (!reachedBottom) warnings.push('El inventario por desplazamiento no confirmó el final de la página; consulta turn-coverage.json.');
+    return result;
+  }
+
+  function finalizeCaptureCoverage(turns, warnings) {
+    const continuity=turnContinuity(turns);
+    state.diagnostics.push({kind:'turn-continuity',...continuity});
+    if (continuity.missingOrderHints.length)
+      warnings.push(`Faltan índices de turno dentro del tramo observado: ${continuity.missingOrderHints.join(', ')}. La conversación no está completa.`);
+    const limited=new Set(state.visualCoverage.filter(c=>c.limited).map(c=>c.turnId));
+    for (const id of limited) {
+      const index=turns.findIndex(t=>t.id===id);
+      warnings.push(`Capturas parciales ${index>=0?'del turno '+(index+1):'de un turno no conservado'}: presupuesto limitado o recorrido visual incompleto. Los paneles con desplazamiento interno no están certificados.`);
+    }
+  }
+
   async function capturePersistentChatGptShells(map, options, warnings, orderMap, nextOrderRef) {
     let shells=chatGptPersistentShells();
     if(shells.length<2) return {used:false,total:shells.length,missed:0};
@@ -1645,6 +1734,8 @@
     state.diagnostics.push({kind:'capture-strategy',strategy:'mixed-shells-dynamic',initialShellCount:shells.length,timestamp:new Date().toISOString()});
     while(steps<MAX_SCAN_STEPS) {
       checkCancelled();
+      await captureCurrentInto(map, options, orderMap, nextOrderRef);
+      mergeEvictedInto(map, orderMap, nextOrderRef);
       shells=chatGptPersistentShells();
       const shell=shells.find(n=>!visited.has(stableTurnId(n)));
       if(!shell) break;
@@ -1652,6 +1743,7 @@
       shell.scrollIntoView({block:'start',inline:'nearest',behavior:'instant'});
       await wait(180);
       const mounted=await waitForTurnMount(shell,2200);
+      await captureCurrentInto(map, options, orderMap, nextOrderRef);
       let restorers=[];
       try {
         if(options.expandCollapsed && mounted) restorers=await expandTurnsSafely([shell]);
@@ -1662,6 +1754,8 @@
       } finally {await restoreExpanded(restorers);}
       toast('OmniChat: capturando conversación',`${visited.size} turnos recorridos · ${map.size} conservados`);
     }
+    await captureCurrentInto(map, options, orderMap, nextOrderRef);
+    mergeEvictedInto(map, orderMap, nextOrderRef);
     state.diagnostics.push({kind:'shell-scan-result',detected:chatGptPersistentShells().length,visited:visited.size,missed,limitReached:steps>=MAX_SCAN_STEPS});
     if(steps>=MAX_SCAN_STEPS) warnings.push('Se alcanzó el límite de recorrido. La cobertura es parcial.');
     return {used:true,total:visited.size,missed};
@@ -1677,6 +1771,7 @@
 
     if (options.deepScan && platformInfo().id === "chatgpt") {
       toast("OmniChat: escaneo profundo", "Detectando todos los turnos persistentes…");
+      await captureWindowSweep(map, options, warnings, orderMap, nextOrderRef);
       const shellResult = await capturePersistentChatGptShells(map, options, warnings, orderMap, nextOrderRef);
       if (shellResult.used) {
         if (shellResult.missed) warnings.push(`${shellResult.missed} de ${shellResult.total} turnos persistentes no llegaron a montar contenido durante el primer recorrido.`);
@@ -1978,7 +2073,8 @@
         historicalEvents: "observed_in_this_tab_only"
       },
       resourceLedger: resourceInfo.ledger || [],
-      visualCoverage: state.visualCoverage,
+      turnCoverage: {...turnContinuity(turns), traversalPasses:[...state.traversalPasses]},
+      visualCoverage: state.visualCoverage.map(c=>({...c,turnOrdinal:turns.findIndex(t=>t.id===c.turnId)+1||null})),
       turns: turns.map((turn, i) => ({
         ...turn,
         ordinal: i + 1,
@@ -1991,10 +2087,13 @@
       archivedResources: resources,
       visualEvidence: state.visualSnapshots.map((shot) => ({
         index: shot.index,
-        label: shot.label,
+        label: shot.turnId && turns.some(t=>t.id===shot.turnId)
+          ? `Turno ${turns.findIndex(t=>t.id===shot.turnId)+1} de ${turns.length} · vista ${shot.tile || 1}` : shot.label,
+        captureLabel: shot.label,
+        captureTurnOrdinal: shot.turnOrdinal ?? null,
         capturedAt: shot.capturedAt,
         mime: shot.mime,
-        turnOrdinal: shot.turnId ? turns.findIndex(t=>t.id===shot.turnId)+1 : shot.turnOrdinal ?? null,
+        turnOrdinal: shot.turnId ? (turns.findIndex(t=>t.id===shot.turnId)+1 || null) : shot.turnOrdinal ?? null,
         turnId:shot.turnId||null,
         viewportRect:shot.viewportRect||null,
         tile: shot.tile ?? null,
@@ -2129,6 +2228,7 @@
       `Bytes archivados: ${resourceInfo.totalBytes}`,
       `Enriquecimiento ChatGPT: ${conversation.sourceLayer?.status || "no aplicable"}`,
       "Cobertura completa de la conversación: no certificada",
+      `Índices de turno omitidos dentro del tramo observado: ${conversation.turnCoverage?.missingOrderHints?.join(", ") || "ninguno detectado; no certifica extremos ni paneles"}`,
       "stdout/stderr/códigos de salida: no se infieren del texto de salida",
       `Archivos sin copia local: ${conversation.turns.reduce((n,t)=>n+(t.files||[]).filter(f=>f.archiveStatus!=="archived").length,0)}`,
       `Referencias de archivo encontradas en capa fuente: ${conversation.sourceLayer?.referencesFound || 0}`,
@@ -2285,6 +2385,7 @@
     state.cancelled = false;
     state.phase = "prepare";
     state.visualCoverage = [];
+    state.traversalPasses = [];
     state.visualSnapshots = [];
     state.diagnostics = [{
       kind: "export-start",
@@ -2319,6 +2420,7 @@
       const initialScroller=findScrollContainer(), initialTop=initialScroller.scrollTop;
       try {turns = await deepCapture(options, warnings);} finally {setScrollTop(initialScroller,initialTop);}
       if (!turns.length) throw new Error("No se detectaron turnos de conversación en esta página.");
+      finalizeCaptureCoverage(turns, warnings);
 
       state.phase = "resolve_files";
       toast("OmniChat: resolviendo adjuntos", "Buscando referencias visibles de archivos…");
@@ -2356,6 +2458,7 @@
           { name: "commands-and-code.md", data: commands },
           { name: "export-report.txt", data: report },
           { name: "diagnostics.json", data: JSON.stringify(conversation.diagnostics, null, 2) },
+          { name: "turn-coverage.json", data: JSON.stringify(conversation.turnCoverage, null, 2) },
           { name: "source-layer.json", data: JSON.stringify(conversation.sourceLayer, null, 2) },
           { name: "README.txt", data: "Abre conversation.html para una vista legible. conversation.json contiene la estructura completa. commands-and-code.md separa ejecuciones reales de herramientas de los bloques de código normales. source-layer.json documenta únicamente el enriquecimiento de referencias de archivos visibles. Los recursos descargados están en assets/ y files/. Las capturas visuales de respaldo están en visual/.\n" }
         ];

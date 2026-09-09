@@ -26,7 +26,7 @@ BOOT = r'''() => {
   window.__saved={}; window.__downloads=[]; window.__messages=[];
   window.browser={
     runtime:{
-      getManifest:()=>({version:'1.3.1'}),
+      getManifest:()=>({version:'1.3.2'}),
       onMessage:{addListener:fn=>window.__messages.push(fn)},
       sendMessage:async m=>{
         if(m.type==='OMNICHAT_CAPTURE_VISIBLE') return {ok:false,error:'Visual capture intentionally not provided in this mock'};
@@ -137,7 +137,7 @@ def main():
             passed('Full 1.3.0 ZIP export fails under simulated denied constructor access',error=outcome['error'])
             page.close()
         page=make_page(browser,fixture(),source)
-        summary=send(page,{'type':'OMNICHAT_GET_SUMMARY'});assert summary['version']=='1.3.1'
+        summary=send(page,{'type':'OMNICHAT_GET_SUMMARY'});assert summary['version']=='1.3.2'
         outcome=export(page,'zip');assert outcome['ok'],outcome
         data=download_data(page);count=check_zip(data)
         (args.out/'browser-fixture.zip').write_bytes(data)
@@ -181,7 +181,7 @@ def main():
             passed('Actual saved user DOM: 8 turns and 22 tool panels; the first explanatory answer is not classified as execution')
             page.close()
         browser.close()
-    report={'version':'1.3.1','environment':'Chromium '+version+' via Playwright on about:blank, native Blob, Python hashlib digest bridge; network blocked',
+    report={'version':'1.3.2','environment':'Chromium '+version+' via Playwright on about:blank, native Blob, Python hashlib digest bridge; network blocked',
             'firefox_live_test':False,'authenticated_chatgpt_test':False,
             'mocked':'browser.runtime, storage, downloads, location and WebCrypto bridge; denied constructor getters simulate the reported failure; no Firefox Xray implementation',
             'tests':tests}

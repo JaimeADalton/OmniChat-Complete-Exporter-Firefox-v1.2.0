@@ -1,15 +1,15 @@
 {
-  "version": "1.3.1",
-  "firefox_integration_test": false,
-  "authenticated_chatgpt_test": false,
-  "authenticated_claude_test": false,
-  "original_user_error_stack_available": false,
-  "diagnosis": "Ruta compatible con el error aproximado del usuario; la causa exacta en Firefox no está confirmada.",
-  "passed_cases": 21,
-  "permissions_changed": false,
+  "version": "1.3.2",
+  "totalTests": 29,
+  "passed": 29,
+  "failed": 0,
+  "firefoxIntegrationTest": false,
+  "authenticatedChatGPTTest": false,
+  "authenticatedClaudeTest": false,
+  "scope": "Node.js native byte/hash tests; Chromium DOM/ZIP/popup regression with blocked network and mocked extension APIs. The uploaded 1.3.1 ZIP supplies real saved DOM and original resource bytes; it is not a live 1.3.2 browser test.",
   "suites": [
     {
-      "version": "1.3.1",
+      "version": "1.3.2",
       "environment": "v22.16.0 / Node vm isolated contexts + native WebCrypto and Blob",
       "firefox_live_test": false,
       "authenticated_chatgpt_test": false,
@@ -58,21 +58,16 @@
       ]
     },
     {
-      "version": "1.3.1",
+      "version": "1.3.2",
       "environment": "Chromium 144.0.7559.96 via Playwright on about:blank, native Blob, Python hashlib digest bridge; network blocked",
       "firefox_live_test": false,
       "authenticated_chatgpt_test": false,
       "mocked": "browser.runtime, storage, downloads, location and WebCrypto bridge; denied constructor getters simulate the reported failure; no Firefox Xray implementation",
       "tests": [
         {
-          "test": "Full 1.3.0 ZIP export fails under simulated denied constructor access",
-          "result": "passed",
-          "error": "Permission denied to access property \"constructor\""
-        },
-        {
           "test": "Full ZIP export with native browser Blob, hashlib digest bridge and both constructor guards",
           "result": "passed",
-          "hashed_entries": 13
+          "hashed_entries": 14
         },
         {
           "test": "Copy button receives zero clicks; native disclosure is restored",
@@ -93,15 +88,229 @@
         {
           "test": "Preflight failure records phase/stack in local storage and leaves the error visible",
           "result": "passed"
+        }
+      ]
+    },
+    {
+      "version": "1.3.2",
+      "environment": "Chromium 144.0.7559.96 / Playwright with blocked network, mocked extension messaging and hashlib digest bridge",
+      "firefox_live_test": false,
+      "authenticated_chatgpt_test": false,
+      "tests": [
+        {
+          "test": "Reproduce skipped short message in 1.3.1 shell-jump strategy",
+          "result": "passed",
+          "orders": [
+            1,
+            2,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ]
         },
         {
-          "test": "Actual saved user DOM: 8 turns and 22 tool panels; the first explanatory answer is not classified as execution",
+          "test": "Overlapping mounted-window sweep recovers 12/12 including short message 3; controls restored; zero Copy clicks",
+          "result": "passed",
+          "orders": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "text": "haz lo que tengas que hacer para que me des la extension lista para descargar e instalar preparada para usar, por ejemplo, en esta misma conversacion\n\nCopy",
+          "coverage": {
+            "basis": "observed_DOM_order_indices",
+            "observedOrderHints": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12
+            ],
+            "missingOrderHints": [],
+            "capturedTurns": 12,
+            "status": "no_internal_gaps_observed",
+            "expectedTotal": null,
+            "completeConversationVerified": false,
+            "limitations": "Indices cannot establish missing leading/trailing messages, unloaded panels, or the full active branch."
+          },
+          "diagnostics": [
+            {
+              "kind": "mounted-window-sweep",
+              "steps": 15,
+              "capturedTurns": 12,
+              "reachedBottom": true,
+              "limitReached": false,
+              "stalled": false,
+              "disclosuresClicked": 0
+            },
+            {
+              "kind": "capture-strategy",
+              "strategy": "mixed-shells-dynamic",
+              "initialShellCount": 5,
+              "timestamp": "2026-09-09T02:59:44.016Z"
+            },
+            {
+              "kind": "shell-scan-result",
+              "detected": 5,
+              "visited": 11,
+              "missed": 0,
+              "limitReached": false
+            },
+            {
+              "kind": "turn-continuity",
+              "basis": "observed_DOM_order_indices",
+              "observedOrderHints": [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12
+              ],
+              "missingOrderHints": [],
+              "capturedTurns": 12,
+              "status": "no_internal_gaps_observed",
+              "expectedTotal": null,
+              "completeConversationVerified": false,
+              "limitations": "Indices cannot establish missing leading/trailing messages, unloaded panels, or the full active branch."
+            }
+          ],
+          "copy": 0,
+          "warnings": []
+        },
+        {
+          "test": "Continuity report flags missing 3 without claiming full coverage, supports zero-based and unknown indices",
+          "result": "passed"
+        },
+        {
+          "test": "HTML documentation is a link, explicit downloads and sandbox HTML remain attachments",
+          "result": "passed",
+          "cases": [
+            {
+              "url": "https://firefox-source-docs.mozilla.org/dom/scriptSecurity/xray_vision.html",
+              "expected": false,
+              "actual": false
+            },
+            {
+              "url": "https://example.org/guide.htm",
+              "expected": false,
+              "actual": false
+            },
+            {
+              "url": "https://example.org/report.html",
+              "expected": true,
+              "actual": true
+            },
+            {
+              "url": "sandbox:/mnt/data/prototype.html",
+              "expected": true,
+              "actual": true
+            },
+            {
+              "url": "https://example.org/report.pdf",
+              "expected": true,
+              "actual": true
+            },
+            {
+              "url": "https://github.com/org/repo/blob/main/README.md",
+              "expected": false,
+              "actual": false
+            },
+            {
+              "url": "https://chatgpt.com/backend-api/file.html",
+              "expected": false,
+              "actual": false
+            }
+          ]
+        },
+        {
+          "test": "Mixed persistent shells and orphan mounted role nodes are all included once",
+          "result": "passed"
+        },
+        {
+          "test": "Visual labels use stable identity and final order while retaining original discovery labels",
+          "result": "passed"
+        },
+        {
+          "test": "Real uploaded 1.3.1 DOM: 11 saved turns, same 34 commands byte-for-text, missing 3 flagged, no six HTML false attachments",
+          "result": "passed",
+          "turns": 11,
+          "tools": 34,
+          "orders": [
+            1,
+            2,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "htmlFiles": [],
+          "coverage": {
+            "basis": "observed_DOM_order_indices",
+            "observedOrderHints": [
+              1,
+              2,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12
+            ],
+            "missingOrderHints": [
+              3
+            ],
+            "capturedTurns": 11,
+            "status": "gaps_detected",
+            "expectedTotal": null,
+            "completeConversationVerified": false,
+            "limitations": "Indices cannot establish missing leading/trailing messages, unloaded panels, or the full active branch."
+          }
+        },
+        {
+          "test": "Full ZIP replay of real saved DOM includes truthful, hash-verified turn-coverage.json",
           "result": "passed"
         }
       ]
     },
     {
-      "version": "1.3.1",
+      "version": "1.3.2",
       "environment": "Chromium popup DOM, browser APIs simulated",
       "firefox_live_test": false,
       "tests": [
@@ -118,24 +327,39 @@
           "result": "passed"
         }
       ]
-    }
-  ],
-  "independent_zip_checks": [
-    {
-      "file": "binary-regression.zip",
-      "sha256_entries_checked": 3,
-      "crc_valid": true
     },
     {
-      "file": "browser-fixture.zip",
-      "sha256_entries_checked": 13,
-      "crc_valid": true
+      "version": "1.3.2",
+      "environment": "Chromium with mocked screenshot bytes; blocked network",
+      "firefox_live_test": false,
+      "tests": [
+        {
+          "test": "Last captured viewport, not an unphotographed advance, determines visual bottom coverage",
+          "result": "passed",
+          "details": {
+            "count": 12,
+            "lastBottom": 12278,
+            "finalBottom": 12278,
+            "coverage": {
+              "turnId": "chatgpt:data-testid:conversation-turn-1",
+              "captures": 12,
+              "reachedBottom": false,
+              "limited": true,
+              "innerScrollAreasFullyCaptured": false
+            }
+          }
+        },
+        {
+          "test": "Cancellation during census restores the original scroll position",
+          "result": "passed",
+          "details": {
+            "threw": true,
+            "message": "Exportación cancelada.",
+            "initial": 1200,
+            "final": 1200
+          }
+        }
+      ]
     }
-  ],
-  "limitations": [
-    "El getter denegado es una simulación; no reproduce toda la implementación Xray.",
-    "Chromium usa about:blank con ubicación y APIs simuladas; digest por puente a hashlib, Blob nativo.",
-    "Node utiliza WebCrypto nativo y contextos VM independientes.",
-    "Las pruebas no certifican exhaustividad de conversaciones, disponibilidad de adjuntos ni descargas en la sesión real."
   ]
 }

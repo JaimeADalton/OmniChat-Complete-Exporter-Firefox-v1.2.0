@@ -1,58 +1,78 @@
-# OmniChat Complete Exporter 1.3.1 — Firefox
+# OmniChat Complete Exporter 1.3.2 — Firefox
 
-Parche de la 1.3.0 para una ruta de error compatible con `Permission denied to access property "constructor"`. Conserva los formatos ZIP, HTML, JSON y Markdown, el extractor de paneles y los permisos anteriores.
+Exportador local de conversaciones de ChatGPT y Claude: HTML, Markdown, JSON y ZIP
+con mensajes, actividad visible, paneles de herramientas, código, recursos accesibles,
+DOM saneado y capturas de respaldo acotadas.
 
-## Instalar esta actualización
+## Instalar para probar
 
-1. En `about:debugging` → **Este Firefox**, quita la versión anterior de OmniChat.
-2. Descomprime este ZIP en una carpeta nueva.
-3. Pulsa **Cargar complemento temporal…** y selecciona su `manifest.json`.
-4. Recarga la conversación. El popup debe mostrar **1.3.1**; si el script de la pestaña conserva otra versión, la extensión pide recargarla.
-5. Selecciona **ZIP completo** y exporta con las opciones habituales. Mantén activa la pestaña si incluyes capturas.
+Paquete de desarrollo SIN firma de Mozilla. En Firefox abre `about:debugging`,
+entra en **Este Firefox**, retira la versión anterior, pulsa **Cargar complemento
+temporal…** y selecciona este ZIP. También puedes descomprimirlo y seleccionar
+`manifest.json`. Recarga la pestaña de ChatGPT/Claude y comprueba la versión 1.3.2.
+La instalación temporal termina al reiniciar Firefox. No se incluyen instrucciones
+para desactivar protecciones. La instalación permanente normal requiere firma.
 
-El paquete no está firmado por Mozilla. La carga temporal desaparece al reiniciar Firefox. No requiere compilar, instalar dependencias ni cambiar las protecciones del navegador.
+## Cambios de 1.3.2
 
-## Corrección incluida
+- Inventario inicial mediante desplazamientos solapados: conserva todos los turnos
+  montados en cada ventana antes de saltar a paneles largos. No pulsa controles ni
+  toma capturas en este primer recorrido.
+- Conservación adicional de vecinos montados y de instantáneas retiradas del DOM.
+- Inclusión de mensajes de usuario/asistente sin contenedor persistente cuando
+  coexisten con otros que sí lo tienen.
+- `turn-coverage.json`: índices observados, huecos internos y límites del recorrido.
+  No infiere un total de mensajes ni certifica extremos, ramas o paneles no cargados.
+- Los enlaces a documentación `.html/.htm` permanecen como enlaces web. Un HTML con
+  descarga explícita o una referencia `sandbox:` conserva su tratamiento de archivo.
+- Etiquetas de imágenes por identidad estable y ordinal final; se conserva también
+  la etiqueta de descubrimiento original para trazabilidad.
+- Cobertura visual calculada sobre el último viewport fotografiado. Sin avance
+  adicional no fotografiado al agotar el presupuesto por turno.
+- Se mantienen las copias binarias explícitas y el preflight de la 1.3.1.
+- Mismos permisos de 1.3.1, sin servidor propio ni telemetría.
 
-La copia binaria de la 1.3.0 utilizaba `TypedArray.slice()`, y la validación/base64 usaban `subarray()`. Esas operaciones pueden consultar `constructor[Symbol.species]`. Se han sustituido por asignación explícita de memoria y copia con `set()`, respetando los rangos de ArrayBuffer y DataView. El texto UTF-8 y los datos recibidos desde TextEncoder, streams y mensajes de la extensión se normalizan a bytes propios. No se usan `wrappedJSObject`, eval ni desactivaciones de Xray.
+## Utilización
 
-Antes de recorrer el chat, la extensión comprueba la copia de bytes, offsets, SHA-256, construcción ZIP y conversión Blob en el navegador. Esta comprobación no prueba la cobertura del chat, la disponibilidad de adjuntos ni la API de descargas.
+En la conversación, abre el icono de la extensión, elige **ZIP completo** y pulsa
+**Exportar conversación**. Mantén la pestaña activa para las capturas de respaldo.
+El inventario añade un recorrido inicial y puede alargar la captura. Puedes cancelar
+con el botón de la página o el popup. `turn-coverage.json`, `export-report.txt`,
+`diagnostics.json` e `integrity.json` documentan el resultado y sus límites.
 
-## Si vuelve a aparecer un error
+## Límites
 
-El aviso permanece visible y muestra la fase. Abre OmniChat y pulsa **Descargar diagnóstico del último error**. Se guarda un JSON con versión, fecha, fase, mensaje y pila. El último diagnóstico se conserva localmente para que cerrar el popup no lo pierda; no se envía automáticamente a ningún servicio.
+Se captura contenido accesible al navegador. No se recupera razonamiento privado ni
+se utilizan alternativas de conversaciones no seleccionadas. La resolución de archivos
+usa la sesión actual y puede fallar si cambian sus rutas o permisos. El DOM y los
+controles de las plataformas también pueden cambiar.
 
-El diagnóstico no contiene un volcado de la conversación. Revisa el texto del mensaje y la pila antes de compartirlo. Se ocultan URLs de páginas y valores habituales de autenticación; se conservan nombres de los scripts de la extensión y números de línea. Borrar o desinstalar la extensión elimina su almacenamiento conforme al funcionamiento del navegador.
+Las capturas son muestras del viewport: máximo 12 por turno y 240 globales. No son
+una reproducción completa de zonas con desplazamiento interno. El historial de eventos
+solo abarca lo observado mientras la extensión estaba activa. La ausencia de huecos
+numéricos no prueba que todo el contenido de la conversación haya sido recuperado.
 
-## Datos y límites
+Las firmas/tokens de URL conocidos se ocultan en metadatos; el texto visible de código,
+las salidas, las imágenes y los archivos adjuntos conservan su contenido. Revisa la copia
+antes de compartirla. Los archivos archivados no se ejecutan por la extensión.
 
-El ZIP conserva documentos legibles, JSON, bloques de código, ejecuciones visibles, informes, DOM saneado y los recursos efectivamente recuperados. Los archivos sin copia local se señalan. Las capturas son muestras parciales, hasta 12 por turno y 240 por exportación, sin garantizar cobertura de paneles con desplazamiento interno. El observador conserva solo actividad que la pestaña haya visto.
+## Pruebas incluidas
 
-La extensión usa la sesión activa para intentar resolver referencias de adjuntos de ChatGPT. Esas rutas de compatibilidad no son una API pública estable. No recupera razonamiento privado ni datos nunca mostrados. Los adjuntos se preservan íntegros y pueden contener información confidencial o contenido ejecutable; archivar un archivo no implica ejecutarlo ni sanearlo.
+`tests/RESULTADOS.json` documenta las pruebas realmente ejecutadas. Son pruebas Node.js
+y Chromium con servicios simulados y red bloqueada, incluida la reproducción de una
+omisión de mensaje corto y el análisis del HTML real guardado en una exportación.
+No se ha hecho una prueba 1.3.2 en Firefox ni en una sesión autenticada de ChatGPT/Claude.
 
-No se añadieron permisos, telemetría ni servicios remotos en este parche. Las consultas de adjuntos conservan los dominios autorizados en la 1.3.0. El visor generado bloquea scripts y cargas remotas automáticas; los enlaces a documentos conservan el riesgo propio de abrir el documento enlazado.
+Los scripts en `tests/` son opcionales y no los carga la extensión. Para reproducir:
 
-## Pruebas realizadas y alcance
-
-Se verificaron 21 casos con Node.js y Chromium: reproducción controlada de acceso denegado a `constructor`, conservación de bytes entre contextos, hashes, ZIP, HTML, JSON, Markdown, controles del popup, diagnóstico y el DOM previamente guardado de una conversación real. La 1.3.0 falla en la simulación; la 1.3.1 completa la exportación de prueba.
-
-No hubo prueba de integración en Firefox ni en una sesión autenticada de ChatGPT/Claude. El entorno Chromium empleó APIs de extensión simuladas y un puente a hashlib para SHA; las pruebas independientes de Node utilizaron WebCrypto nativo. Simular un getter denegado no reproduce toda la implementación Xray de Firefox. Sin el mensaje y la pila originales del usuario, la causa concreta en su sesión queda pendiente de confirmación.
-
-Detalles: `tests/RESULTADOS.json`. No se incluyen conversaciones ni adjuntos personales dentro de esta extensión.
-
-## Comprobaciones opcionales para desarrolladores
-
-Estas herramientas son opcionales; la extensión no requiere Node ni Python para utilizarse.
-
-```sh
-node tests/binary-regression.cjs /tmp/omnichat-tests
-python tests/verify_export.py /tmp/omnichat-tests/binary-regression.zip
+```
+node tests/binary-regression.cjs /tmp/omnichat-binary
+python tests/browser-regression.py --out /tmp/omnichat-browser
+python tests/continuity-regression.py --out /tmp/omnichat-continuity
+python tests/popup-regression.py
+python tests/visual-coverage-regression.py
 ```
 
-La prueba de navegador requiere Playwright, BeautifulSoup y Chromium:
-
-```sh
-python tests/browser-regression.py --out /tmp/omnichat-tests
-```
-
-El verificador comprueba integridad binaria, no autenticidad ni exhaustividad de una conversación.
+Las pruebas Python requieren Playwright, Chromium, BeautifulSoup y Pillow. El análisis
+con `--source-zip` requiere una exportación local que tú proporciones; no se incluye
+ninguna conversación privada en este paquete.

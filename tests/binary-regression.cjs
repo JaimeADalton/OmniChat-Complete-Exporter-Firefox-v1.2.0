@@ -113,12 +113,12 @@ const bytes=a=>Array.from(a);
     const error=new Error('Permission denied to access property "constructor" https://example.org/private?sig=secret Bearer eySECRET');
     error.stack='Error\n at normalizedBytes (moz-extension://random-uuid/content/content.js:120:10)';
     const report=api.recordExportFailure(error,{format:'zip'});
-    assert.equal(report.version,'1.3.1');assert.equal(report.phase,'integrity');
+    assert.equal(report.version,'1.3.2');assert.equal(report.phase,'integrity');
     assert.match(report.stack,/content\/content.js:120:10/);
     assert.doesNotMatch(JSON.stringify(report),/random-uuid|eySECRET|sig=secret|example.org/);
     assert.equal(savedDiagnostic.omnichatLastError,report);
   });
-  const result={version:'1.3.1',environment:process.version+' / Node vm isolated contexts + native WebCrypto and Blob',
+  const result={version:'1.3.2',environment:process.version+' / Node vm isolated contexts + native WebCrypto and Blob',
     firefox_live_test:false,authenticated_chatgpt_test:false,
     error_reproduction:'Simulated denied constructor getter, not a Firefox Xray implementation',tests};
   fs.writeFileSync(path.join(dir,'binary-results.json'),JSON.stringify(result,null,2)+'\n');
