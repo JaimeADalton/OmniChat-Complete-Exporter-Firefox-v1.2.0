@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.2.0";
-  const SCHEMA_VERSION = "1.2";
+  const VERSION = "1.3.0";
+  const SCHEMA_VERSION = "1.3";
   const MAX_LIVE_EVENTS = 1000;
   const MAX_SCAN_STEPS = 320;
   const RESOURCE_FETCH_TIMEOUT_MS = 12000;
@@ -21,6 +21,9 @@
     observer: null,
     exporting: false,
     visualSnapshots: [],
+    cancelled: false,
+    navigationKey: location.origin + location.pathname,
+    visualCoverage: [],
     diagnostics: []
   };
 
@@ -65,24 +68,56 @@
   function sanitizeExternalUrlForMetadata(value) {
     const url = absoluteUrl(value);
     if (!/^https?:/i.test(url)) return url;
-    try {
-      const parsed = new URL(url);
-      const sensitiveKeys = [
-        "token", "sig", "signature", "x-amz-signature", "x-amz-credential",
-        "x-amz-security-token", "x-goog-signature", "authorization", "auth",
-        "jwt", "access_token", "expires", "policy", "key-pair-id"
-      ];
-      let changed = false;
-      for (const key of [...parsed.searchParams.keys()]) {
-        if (sensitiveKeys.includes(key.toLowerCase())) {
-          parsed.searchParams.set(key, "[redacted]");
-          changed = true;
-        }
-      }
-      return changed ? parsed.href : url;
-    } catch {
-      return url;
-    }
+    // Avoid URLSearchParams iteration across Firefox content-script compartments.
+    // A decoding failure is fail-closed; never fall back to the original secret.
+    return url.replace(/([?&]|&amp;)([^=&#\s]+)=([^&#\s]*)/gi, (match, sep, rawKey, rawValue) => {
+      let key;
+      try { key = decodeURIComponent(rawKey).toLowerCase(); }
+      catch { return `${sep}redacted=REDACTED`; }
+      const secret = /^(?:token|sig|signature|auth|authorization|jwt|access_token|refresh_token|id_token|api[_-]?key|key|policy|key-pair-id|x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential))$/i.test(key);
+      return secret ? `${sep}${rawKey}=REDACTED` : match;
+    });
+  }
+
+  function codeText(node) {
+    const code = node?.querySelector?.('code') || node;
+    if (!code) return '';
+    const lines = code.querySelectorAll?.('.cm-line');
+    return String(lines?.length ? [...lines].map(n => n.textContent || '').join('\n') : code.textContent || '').replace(/\r\n?/g, '\n');
+  }
+
+  function fenced(text, language = '') {
+    const body = String(text ?? '');
+    const runs = body.match(/`+/g) || [];
+    const tick = '`'.repeat(Math.max(3, ...runs.map(v => v.length + 1)));
+    const lang = String(language).replace(/[^\w+.#-]/g, '');
+    return `${tick}${lang === 'text' ? '' : lang}\n${body}${body.endsWith('\n') ? '' : '\n'}${tick}`;
+  }
+
+  function normalizedBytes(value) {
+    if (typeof value === 'string') return encoder.encode(value);
+    // instanceof Uint8Array is NOT a cross-realm byte test.
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    if (Object.prototype.toString.call(value) === '[object ArrayBuffer]') return new Uint8Array(value).slice();
+    throw new TypeError('Se rechazó un recurso que no es texto ni un búfer binario. No se convierte a String.');
+  }
+
+  async function sha256Bytes(value) {
+    const digest = await crypto.subtle.digest('SHA-256', normalizedBytes(value));
+    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function ensureCurrentConversation() {
+    const key = location.origin + location.pathname;
+    if (key === state.navigationKey) return;
+    if (state.exporting) { state.cancelled = true; throw new Error('La conversación cambió durante la captura.'); }
+    state.navigationKey = key;
+    state.liveLog = []; state.liveSignatures.clear(); state.evictedTurns.clear();
+    state.weakIds = new WeakMap(); state.liveTimers = new WeakMap();
+  }
+
+  function checkCancelled() {
+    if (state.cancelled || state.navigationKey !== location.origin + location.pathname) throw new Error('Exportación cancelada.');
   }
 
   function platformInfo() {
@@ -129,18 +164,13 @@
   }
 
   function chatGptPersistentShells() {
-    const selectors = [
-      'section[data-testid^="conversation-turn-"]',
-      'article[data-testid^="conversation-turn-"]',
-      '[data-turn-id-container][data-turn]',
-      'section[data-turn][data-turn-id]',
-      'article[data-turn][data-turn-id]'
-    ];
-    for (const selector of selectors) {
-      const matches = dedupeElements([...document.querySelectorAll(selector)]);
-      if (matches.length) return matches;
-    }
-    return [];
+    const all = dedupeElements([...document.querySelectorAll([
+      'section[data-testid^="conversation-turn-"]', 'article[data-testid^="conversation-turn-"]',
+      '[data-turn-id-container][data-turn]', 'section[data-turn][data-turn-id]', 'article[data-turn][data-turn-id]'
+    ].join(','))]);
+    // Sections and articles coexist in the supplied real export. Do not return only
+    // the first selector that matches: that silently skipped two of eight turns.
+    return all.filter(node => !all.some(parent => parent !== node && parent.contains(node)));
   }
 
   function chatGptTurns() {
@@ -246,16 +276,11 @@
   }
 
   function deriveOrderHint(el, id) {
-    const candidates = [
-      el.getAttribute?.("data-test-render-count"),
-      el.getAttribute?.("data-testid"),
-      id
-    ];
-    for (const value of candidates) {
-      const match = String(value || "").match(/(?:turn-|render-count:|:)(\d+)(?:\D*$|$)/i);
-      if (match) return Number(match[1]);
-    }
-    return null;
+    const testId = el.getAttribute?.('data-testid') || '';
+    const match = testId.match(/^conversation-turn-(\d+)$/);
+    if (match) return Number(match[1]);
+    const count = el.getAttribute?.('data-test-render-count');
+    return count != null && /^\d+$/.test(count) ? Number(count) : null;
   }
 
   function modelInfo(el) {
@@ -333,59 +358,48 @@
 
   function extractToolExecutions(el) {
     const executions = [];
-    const seen = new Set();
     const leaves = leafPreNodes(el);
-
     for (const commandPre of leaves) {
-      if (!commandPre.closest("#code-block-viewer, .cm-editor")) continue;
-      const outerPre = nearestOuterPre(commandPre, el);
-      if (!outerPre) continue;
-
-      const command = cleanText(commandPre.textContent || "");
-      if (!command) continue;
-      const tool = toolLabelFromOuterPre(outerPre, command);
-      if (!tool || tool.length > 80) continue;
-
-      let container = outerPre.parentElement;
+      if (!commandPre.closest('#code-block-viewer, .cm-editor') && !commandPre.matches('[data-tool-command]')) continue;
+      const outer = nearestOuterPre(commandPre, el);
+      const explicit = commandPre.closest('[data-testid="tool-execution"], [data-tool-execution]');
+      const command = codeText(commandPre);
+      if (!command.trim()) continue;
+      const label = explicit?.getAttribute('data-tool-name') || toolLabelFromOuterPre(outer, command);
+      if (!/^(?:Python|Bash|Shell|Terminal|Console|Computer|Node(?:\.js)?|Container|container\.(?:exec|feed_chars)|python(?:_user_visible)?(?:\.exec)?|JavaScript tool|Herramienta)(?:\s*\d+)?$/i.test(label)) continue;
+      let container = outer?.parentElement || commandPre.parentElement;
       let outputNodes = [];
-      let depth = 0;
-      while (container && container !== el && depth < 10) {
-        const otherLeaves = leafPreNodes(container).filter((candidate) =>
-          candidate !== commandPre && !outerPre.contains(candidate)
-        );
-        if (otherLeaves.length) {
-          outputNodes = otherLeaves;
+      let matched = false;
+      for (let depth = 0; container && container !== el && depth < 12; depth++, container = container.parentElement) {
+        // Never climb out of one execution and borrow output from another block
+        // or from the final prose response.
+        if (container.matches('[data-message-author-role], article[data-turn], section[data-turn]')) break;
+        const localLeaves = leafPreNodes(container);
+        const editors = localLeaves.filter(p => p.closest('#code-block-viewer, .cm-editor') || p.matches('[data-tool-command]'));
+        if (editors.length > 1) break;
+        const others = localLeaves.filter(p => p !== commandPre && !outer?.contains(p));
+        if (others.length) {
+          const cmdBranch = [...container.children].find(c => c.contains(commandPre));
+          const separate = cmdBranch && others.every(p => !cmdBranch.contains(p));
+          const resultLike = others.every(p => !p.closest('#code-block-viewer, .cm-editor') && !p.querySelector('code'));
+          if (separate && resultLike && !container.matches('.markdown, .prose')) {
+            outputNodes = others; matched = true;
+          }
           break;
         }
-        container = container.parentElement;
-        depth += 1;
+        if (container === explicit) { matched = true; break; }
       }
-
-      // Las ejecuciones visibles de ChatGPT tienen un panel de resultado, incluso
-      // cuando está vacío. Exigir ese panel evita confundir bloques de código
-      // normales de una respuesta con comandos realmente ejecutados.
-      if (!outputNodes.length) continue;
-
-      const outputs = outputNodes.map((node) => cleanText(node.textContent || ""));
-      const output = outputs.filter(Boolean).join("\n\n");
-      const status = output && /(?:failed with status|traceback|uncaught|exception|unexpected eof|\berror\b|\bfatal\b)/i.test(output)
-        ? "error_or_nonzero"
-        : output ? "completed_with_output" : "completed_no_output";
-      const key = hashString(`${tool}\n${command}\n${outputs.join("\n---\n")}`);
-      if (seen.has(key)) continue;
-      seen.add(key);
-
+      if (!matched) continue;
+      const outputs = outputNodes.map(codeText);
+      const output = outputs.join('\n\n');
+      const commandLanguage = /^\s*(?:bash|sh|zsh)\b/.test(command) ? 'bash' : /^python/i.test(label) ? 'python' : /bash|shell|terminal/i.test(label) ? 'sh' : 'text';
       executions.push({
-        index: executions.length,
-        tool,
-        command,
-        commandLanguage: classifyCode(command, "bash", tool) === "shell_code" ? "shell" : "text",
-        output,
-        outputs,
-        outputKind: "stdout_or_stderr",
-        status,
-        source: "visible_tool_panel",
-        hash: key
+        index: executions.length, tool: label, command, commandLanguage, output, outputs,
+        outputKind: 'combined_visible_output',
+        status: !outputNodes.length ? 'output_not_visible' : output.length ? 'output_visible' : 'empty_output_panel',
+        exitCode: null, source: 'visible_tool_panel',
+        commandBlockIndex: leaves.indexOf(commandPre), outputBlockIndices: outputNodes.map(n => leaves.indexOf(n)),
+        hash: hashString(`${label}\n${command}\n${output}`)
       });
     }
     return executions;
@@ -393,70 +407,28 @@
 
   function extractCodeBlocks(el, toolExecutions = []) {
     const blocks = [];
-    const seen = new Set();
-    const commandTexts = new Set(toolExecutions.map((e) => cleanText(e.command)));
-    const outputTexts = new Set(toolExecutions.flatMap((e) => (e.outputs || []).map((v) => cleanText(v))).filter(Boolean));
-
-    for (const pre of leafPreNodes(el)) {
-      const text = cleanText((pre.querySelector("code") || pre).textContent || "");
-      if (!text) continue;
-
-      let language = detectCodeLanguage(pre);
-      let label = shortLabelNear(pre);
-      let kind;
-      if (commandTexts.has(text)) {
-        kind = "tool_command";
-        language = "shell";
-        const execution = toolExecutions.find((e) => cleanText(e.command) === text);
-        label = execution?.tool || label;
-      } else if (outputTexts.has(text)) {
-        kind = "tool_output";
-        language = "text";
-        const execution = toolExecutions.find((e) => (e.outputs || []).some((v) => cleanText(v) === text));
-        label = execution?.tool ? `${execution.tool} output` : label;
-      } else {
-        kind = classifyCode(text, language, label);
-      }
-
-      const key = hashString(`${kind}\n${language}\n${text}`);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      blocks.push({
-        index: blocks.length,
-        kind,
-        language,
-        label: label || null,
-        text,
-        source: "pre",
-        hash: key
-      });
+    const leaves = leafPreNodes(el);
+    for (const [preIndex, pre] of leaves.entries()) {
+      const text = codeText(pre);
+      if (!text.length) continue;
+      const cmd = toolExecutions.find(e => e.commandBlockIndex === preIndex);
+      const out = toolExecutions.find(e => e.outputBlockIndices.includes(preIndex));
+      const kind = cmd ? 'tool_command' : out ? 'tool_output' : classifyCode(text, detectCodeLanguage(pre), shortLabelNear(pre));
+      const language = cmd ? cmd.commandLanguage : out ? 'text' : detectCodeLanguage(pre);
+      const label = cmd?.tool || (out ? `${out.tool} · salida visible` : shortLabelNear(pre)) || null;
+      blocks.push({index: blocks.length, preIndex, kind, language, label, text, source: 'pre', hash: hashString(`${kind}\n${language}\n${text}`)});
     }
-
-    // Fallback para herramientas que renderizan CLI/código en contenedores monoespaciados
-    // sin usar <pre>. Solo se conserva si no duplica contenido ya capturado.
-    const pseudoNodes = [...el.querySelectorAll('[data-testid*="execution"], [data-testid*="tool"], [data-testid*="terminal"], [data-testid*="computer"], [class*="font-mono"], [class*="monospace"]')];
-    for (const node of pseudoNodes) {
-      if (node.closest("pre") || node.querySelector("pre")) continue;
-      const text = safeInnerText(node);
-      if (!text || text.length < 8 || text.length > 500000) continue;
-      const label = node.getAttribute("aria-label") || node.getAttribute("data-testid") || shortLabelNear(node);
-      const language = detectCodeLanguage(node);
-      const kind = classifyCode(text, language, label);
-      if (kind !== "shell_code" && !/\n/.test(text)) continue;
-      const key = hashString(`${kind}\n${language}\n${text}`);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      blocks.push({ index: blocks.length, kind, language, label: label || null, text, source: "monospace_fallback", hash: key });
+    // Inline examples remain examples. Identical commands at different positions
+    // are distinct occurrences, not duplicates to discard by text.
+    for (const code of el.querySelectorAll('code')) {
+      if (code.closest('pre')) continue;
+      const text = codeText(code);
+      if (text) blocks.push({index: blocks.length, kind:'inline_code', language:null, label:null, text, source:'code', hash:hashString(text)});
     }
-
-    const inlineCodes = [...el.querySelectorAll("code")].filter((code) => !code.closest("pre"));
-    for (const code of inlineCodes) {
-      const text = cleanText(code.textContent || "");
-      if (!text || text.length > 10000) continue;
-      const key = hashString(`inline\n${text}`);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      blocks.push({ index: blocks.length, kind: "inline_code", language: null, label: null, text, hash: key });
+    for (const node of el.querySelectorAll('[data-tool-command], [data-terminal-output]')) {
+      if (node.closest('pre') || node.querySelector('pre')) continue;
+      const text = codeText(node);
+      if (text) blocks.push({index:blocks.length, kind:'code', language:'text', label:null, text, source:'explicit_monospace_fallback', hash:hashString(text)});
     }
     return blocks;
   }
@@ -546,6 +518,7 @@
       seen.add(abs);
       media.push({
         kind: mediaKindFromTag(node.tagName),
+        decorative: /\/s2\/favicons(?:[?#]|$)|favicon\.(?:ico|png)/i.test(abs),
         url: abs,
         urlForMetadata: sanitizeExternalUrlForMetadata(abs),
         alt: node.getAttribute("alt") || null,
@@ -578,21 +551,17 @@
     return media;
   }
 
-  const FILE_EXT_RE = /\.(pdf|docx?|xlsx?|pptx?|csv|tsv|zip|7z|rar|tar|gz|json|jsonl|txt|md|rtf|py|js|mjs|cjs|ts|tsx|jsx|html?|css|xml|ya?ml|sql|ipynb|png|jpe?g|gif|webp|svg|mp3|wav|m4a|mp4|webm|mov)(?:$|[?#])/i;
+  const FILE_EXT_RE = /\.(pdf|docx?|xlsx?|pptx?|csv|tsv|zip|xpi|7z|rar|tar|gz|json|jsonl|txt|md|rtf|py|js|mjs|cjs|ts|tsx|jsx|html?|css|xml|ya?ml|sql|ipynb|png|jpe?g|gif|webp|svg|mp3|wav|m4a|mp4|webm|mov)(?:$|[?#])/i;
 
   function isLikelyFileLink(a, href) {
-    if (!href || /^javascript:/i.test(href)) return false;
-    if (a.hasAttribute("download")) return true;
-    if (FILE_EXT_RE.test(href)) return true;
-    const text = safeInnerText(a);
-    if (FILE_EXT_RE.test(text)) return true;
+    if (!href || /^(?:javascript|vbscript):/i.test(href)) return false;
+    if (a.hasAttribute('download')) return true;
     try {
       const u = new URL(href);
-      if (/oaiusercontent\.com$|anthropic\.com$|claude\.ai$/i.test(u.hostname) && /file|download|attachment|asset|upload/i.test(`${u.pathname}${u.search}`)) return true;
-    } catch {
-      if (href.startsWith("blob:")) return true;
-    }
-    return href.startsWith("blob:");
+      if ((u.hostname==='github.com' && /\/(?:blob|tree)\//.test(u.pathname)) || u.hostname==='gist.github.com') return false;
+      if (a.closest('[data-testid*="citation"]')) return false;
+    } catch { /* sandbox: and blob: may not have a web host */ }
+    return /^(?:sandbox:|blob:)/.test(href) || FILE_EXT_RE.test(href);
   }
 
   function extractUiFileTiles(el) {
@@ -647,6 +616,13 @@
       });
     }
 
+    for (const button of el.querySelectorAll('button.behavior-btn')) {
+      if (button.closest('pre,code')) continue;
+      const text = cleanText(button.textContent || button.getAttribute('aria-label') || '');
+      if (!text || !/(?:descargar|download|\bxpi\b|\bzip\b|sha-?256|exporter|archivo|file)/i.test(text)) continue;
+      if (files.some(f=>f.text===text)) continue;
+      files.push({text, href:null, hrefForMetadata:null, title:'Referencia interactiva visible; pendiente de resolver', downloadName:null, kind:'file_button_reference', source:'visible_behavior_button', fileId:null});
+    }
     return files;
   }
 
@@ -746,7 +722,7 @@
       if (role === "user" || role === "assistant") {
         for (const part of parts) {
           if (typeof part !== "string") continue;
-          const re = /\[([^\]]+)\]\(sandbox:\/mnt\/data\/([^)]+)\)/g;
+          const re = /\[([^\]]+)\]\(sandbox:\/mnt\/data\/((?:[^()]|\([^()]*\))+)\)/g;
           let match;
           while ((match = re.exec(part))) {
             sandboxLinks.push({
@@ -811,11 +787,28 @@
   }
 
   async function chatGptApiJson(path, token = null) {
-    const headers = { Accept: "application/json" };
-    if (token) headers.Authorization = `Bearer ${token}`;
-    const response = await fetch(path, { credentials: "include", cache: "no-store", headers });
-    if (!response.ok) throw new Error(`HTTP ${response.status} en ${path}`);
-    return response.json();
+    checkCancelled();
+    const url = new URL(path, location.origin);
+    if (url.origin !== location.origin || !/^\/(?:backend-api|api\/auth)\//.test(url.pathname)) throw new Error('Ruta de API fuera de la conversación autorizada.');
+    const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),RESOURCE_FETCH_TIMEOUT_MS);
+    try {
+      const headers={Accept:'application/json'};
+      if(token) headers.Authorization=`Bearer ${token}`;
+      const response=await fetch(url.href,{credentials:'include',cache:'no-store',headers,signal:controller.signal});
+      if(!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } finally {clearTimeout(timer);}
+  }
+
+  async function resolveVisibleSandbox(link, conversationId, token) {
+    // Optional compatibility adapter for a visible sandbox link. This endpoint is
+    // not a public API contract. Failure is recorded, never treated as success.
+    const path=link.sandboxPath.replace(/^sandbox:/,'');
+    if(!path.startsWith('/mnt/data/') || path.split('/').includes('..')) throw new Error('Ruta sandbox no válida.');
+    const query=`message_id=${encodeURIComponent(link.messageId)}&sandbox_path=${encodeURIComponent(path)}`;
+    const meta=await chatGptApiJson(`/backend-api/conversation/${encodeURIComponent(conversationId)}/interpreter/download?${query}`,token);
+    if(!meta?.download_url) throw new Error('La referencia visible no proporcionó URL de descarga.');
+    return meta;
   }
 
   async function chatGptAccessToken() {
@@ -899,6 +892,9 @@
       const convo = await chatGptApiJson(`/backend-api/conversation/${encodeURIComponent(conversationId)}`, token);
       const extracted = extractSafeFileRefsFromConversation(convo);
       const evidence = visibleFileEvidence(turns);
+      extracted.refs = [...new Map(extracted.refs.map(r=>[r.fileId,r])).values()].map(r => {
+        const named=extractSafeFileRefsFromConversation(convo).refs.find(x=>x.fileId===r.fileId && x.name); return named||r;
+      });
       result.referencesFound = extracted.refs.length;
       result.sandboxLinksFound = extracted.sandboxLinks.length;
 
@@ -962,6 +958,7 @@
         for (const entry of matchingEntries) {
           if (!entry.file) continue;
           entry.file.fileId = ref.fileId;
+          entry.file.expectedSize = Number(meta.file_size_bytes || ref.size) || null;
           entry.file.href = meta.download_url;
           entry.file.hrefForMetadata = sanitizedUrl;
           entry.file.downloadName = entry.file.downloadName || visibleName;
@@ -973,7 +970,7 @@
           // Busca el turno que contiene la etiqueta visible del enlace; si no, usa el último
           // turno del mismo rol para conservar el archivo sin inventar contenido.
           const turn = turns.find((candidate) => candidate.role === sandboxMatch.role && candidate.text?.includes(sandboxMatch.label))
-            || [...turns].reverse().find((candidate) => candidate.role === sandboxMatch.role);
+            ;
           if (turn) {
             turn.files.push({
               text: sandboxMatch.label || visibleName,
@@ -989,7 +986,32 @@
         }
       }
 
-      result.status = "ok";
+      result.generatedLinks = [];
+      for (const link of extracted.sandboxLinks) {
+        const filename = link.filename;
+        const byId = turns.filter(t=>t.role===link.role && (t.id.includes(link.messageId)||(t.rawHtml||'').includes(link.messageId)));
+        const matches = byId.length===1 ? byId : turns.filter(t=>t.role===link.role && (t.files||[]).some(f=>f.text===link.label || f.downloadName===filename));
+        if(matches.length!==1) { result.generatedLinks.push({name:filename,label:link.label,status:'unmatched_or_ambiguous_dom',messageId:link.messageId}); continue; }
+        const turn = matches[0];
+        let file = turn.files.find(f=>f.downloadName===filename) || turn.files.find(f=>f.text===link.label);
+        if(file) turn.files = turn.files.filter(f=>f===file || !(f.text===link.label && !f.href));
+        if(!file) { file={text:link.label,href:null,hrefForMetadata:null,downloadName:filename,kind:'sandbox_attachment',source:'visible_sandbox_link'}; turn.files.push(file); }
+        file.downloadName=filename; file.sandboxPath=link.sandboxPath; file.messageId=link.messageId;
+        if(file.href) continue;
+        const record={name:filename,label:link.label,messageId:link.messageId,turnId:turn.id,sandboxPath:link.sandboxPath,status:'unresolved'};
+        if(options.archiveFiles) {
+          try {
+            const meta=await resolveVisibleSandbox(link,conversationId,token);
+            file.href=meta.download_url; file.hrefForMetadata=sanitizeExternalUrlForMetadata(meta.download_url);
+            file.expectedSize=Number(meta.file_size_bytes)||null;
+            file.source+=' + sandbox_download_adapter';
+            record.status='download_url_resolved'; result.downloadUrlsResolved++;
+          } catch(error) { record.error=error.name==='AbortError'?'timeout':String(error.message||error); }
+        }
+        result.generatedLinks.push(record);
+      }
+      result.unresolvedGeneratedLinks = result.generatedLinks.filter(f=>f.status!=='download_url_resolved').length;
+      result.status = result.unresolvedGeneratedLinks ? 'partial' : 'ok';
       state.diagnostics.push({
         kind: "chatgpt-source-enrichment",
         timestamp: new Date().toISOString(),
@@ -1048,7 +1070,8 @@
       }
     });
 
-    const forbidden = clone.querySelectorAll("script, style, link[rel='stylesheet'], meta, object, embed, base");
+    clone.querySelectorAll("#omnichat-export-toast, .chatgptbox-toolbar-container").forEach(n=>n.remove());
+    const forbidden = clone.querySelectorAll("script, style, link, meta, object, embed, base, template, svg foreignObject, svg animate, svg set");
     forbidden.forEach((node) => node.remove());
 
     for (const iframe of clone.querySelectorAll("iframe")) {
@@ -1061,7 +1084,7 @@
     for (const node of [clone, ...clone.querySelectorAll("*")]) {
       for (const attr of [...node.attributes]) {
         const name = attr.name.toLowerCase();
-        if (name.startsWith("on") || ["nonce", "integrity", "srcdoc"].includes(name)) {
+        if (name.startsWith("on") || ["nonce", "integrity", "srcdoc", "action", "formaction", "ping", "autofocus", "autoplay", "form"].includes(name)) {
           node.removeAttribute(attr.name);
           continue;
         }
@@ -1069,13 +1092,14 @@
           node.removeAttribute(attr.name);
           continue;
         }
-        if (["href", "src", "poster"].includes(name)) {
+        if (["href", "src", "poster", "xlink:href"].includes(name)) {
           const abs = absoluteUrl(attr.value);
-          if (/^javascript:/i.test(abs)) node.removeAttribute(attr.name);
+          if (/^(?:javascript|vbscript):/i.test(abs) || (name !== "src" && /^data:/i.test(abs))) node.removeAttribute(attr.name);
           else node.setAttribute(attr.name, sanitizeExternalUrlForMetadata(abs));
         }
         if (name === "srcset") node.removeAttribute(attr.name);
       }
+      if (node.tagName === "INPUT" && ["password", "hidden"].includes(node.type)) { node.remove(); continue; }
       if (node.tagName === "INPUT") {
         if (node.type === "checkbox" || node.type === "radio") {
           if (node.checked) node.setAttribute("checked", "checked");
@@ -1100,74 +1124,41 @@
   }
 
   function domToMarkdown(root) {
-    function walk(node, depth = 0) {
-      if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
-      if (node.nodeType !== Node.ELEMENT_NODE) return "";
+    const protectedBlocks = [];
+    function protect(value) { const key = `OMNICHATPROTECTEDBLOCK${protectedBlocks.length}END`; protectedBlocks.push(value); return `\n\n${key}\n\n`; }
+    function walk(node, listDepth = 0) {
+      if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
+      if (node.nodeType !== Node.ELEMENT_NODE) return '';
       const tag = node.tagName.toLowerCase();
-      if (["script", "style", "noscript", "svg"].includes(tag)) return "";
-      const children = () => [...node.childNodes].map((n) => walk(n, depth + 1)).join("");
-      const text = () => cleanText(children());
-      if (/^h[1-6]$/.test(tag)) return `\n${"#".repeat(Number(tag[1]))} ${text()}\n\n`;
-      if (tag === "p" || tag === "div" || tag === "section" || tag === "article") {
-        const value = children();
-        return value ? `${value}\n` : "";
+      if (['script','style','noscript','svg','template'].includes(tag)) return '';
+      const children = () => [...node.childNodes].map(n => walk(n,listDepth)).join('');
+      if (tag === 'pre') {
+        const leaf = node.querySelector('pre') ? [...node.querySelectorAll('pre')].filter(p=>!p.querySelector('pre'))[0] : node;
+        const label = leaf !== node ? toolLabelFromOuterPre(node,codeText(leaf)) : '';
+        return protect((label ? label+'\n\n' : '') + fenced(codeText(leaf), detectCodeLanguage(leaf)));
       }
-      if (tag === "br") return "\n";
-      if (tag === "strong" || tag === "b") return `**${children()}**`;
-      if (tag === "em" || tag === "i") return `*${children()}*`;
-      if (tag === "del" || tag === "s") return `~~${children()}~~`;
-      if (tag === "code" && node.parentElement?.tagName.toLowerCase() !== "pre") return `\`${(node.textContent || "").replace(/`/g, "\\`")}\``;
-      if (tag === "pre") {
-        const code = node.querySelector("code") || node;
-        const lang = detectCodeLanguage(node);
-        return `\n\n\`\`\`${lang === "text" ? "" : lang}\n${String(code.textContent || "").replace(/\n$/, "")}\n\`\`\`\n\n`;
+      if (tag === 'code') return '`'+(node.textContent||'').replace(/`/g,'\\`')+'`';
+      if (/^h[1-6]$/.test(tag)) return `\n${'#'.repeat(Number(tag[1]))} ${children().trim()}\n\n`;
+      if (['p','div','section','article'].includes(tag)) return `${children()}\n`;
+      if (tag === 'br') return '\n';
+      if (tag === 'strong'||tag === 'b') return `**${children()}**`;
+      if (tag === 'em'||tag === 'i') return `*${children()}*`;
+      if (tag === 'hr') return '\n---\n';
+      if (tag === 'img') { const src=sanitizeExternalUrlForMetadata(node.getAttribute('src')||''); return src?`![${escapeMd(node.getAttribute('alt')||'imagen')}](${src.replace(/\)/g,'%29')})`:''; }
+      if (tag === 'a') { const href=sanitizeExternalUrlForMetadata(node.getAttribute('href')||''); return href?`[${children().trim()||href}](${href.replace(/\)/g,'%29')})`:children(); }
+      if (tag === 'ul'||tag === 'ol') return '\n'+[...node.children].filter(c=>c.tagName==='LI').map((li,i)=>'  '.repeat(listDepth)+(tag==='ol'?`${i+1}. `:'- ')+[...li.childNodes].map(n=>walk(n,listDepth+1)).join('').trim()).join('\n')+'\n';
+      if (tag === 'blockquote') return '\n'+children().trim().split('\n').map(v=>'> '+v).join('\n')+'\n';
+      if (tag === 'table') {
+        const rows=[...node.querySelectorAll('tr')].map(tr=>[...tr.children].map(c=>(c.textContent||'').trim().replace(/\|/g,'\\|').replace(/\n/g,'<br>')));
+        if (!rows.length) return '';
+        return '\n| '+rows[0].join(' | ')+' |\n| '+rows[0].map(()=>'---').join(' | ')+' |\n'+rows.slice(1).map(r=>'| '+r.join(' | ')+' |').join('\n')+'\n';
       }
-      if (tag === "blockquote") {
-        return `\n${cleanText(children()).split("\n").map((line) => `> ${line}`).join("\n")}\n\n`;
-      }
-      if (tag === "a") {
-        const href = sanitizeExternalUrlForMetadata(node.getAttribute("href") || "");
-        const label = cleanText(children()) || href;
-        return href ? `[${label.replace(/\]/g, "\\]")}](${href.replace(/\)/g, "%29")})` : label;
-      }
-      if (tag === "img") {
-        const src = sanitizeExternalUrlForMetadata(node.getAttribute("src") || "");
-        return src ? `![${escapeMd(node.getAttribute("alt") || "imagen")}](${src.replace(/\)/g, "%29")})` : "[imagen]";
-      }
-      if (tag === "ul" || tag === "ol") {
-        const ordered = tag === "ol";
-        const rows = [...node.children].filter((c) => c.tagName?.toLowerCase() === "li").map((li, i) => {
-          const body = cleanText([...li.childNodes].filter((n) => !(n.nodeType === 1 && ["ul", "ol"].includes(n.tagName.toLowerCase()))).map((n) => walk(n, depth + 1)).join(""));
-          const nested = [...li.children].filter((c) => ["ul", "ol"].includes(c.tagName?.toLowerCase())).map((n) => walk(n, depth + 1)).join("");
-          const prefix = ordered ? `${i + 1}. ` : "- ";
-          return `${"  ".repeat(Math.max(0, depth - 1))}${prefix}${body}${nested ? `\n${nested}` : ""}`;
-        });
-        return `\n${rows.join("\n")}\n`;
-      }
-      if (tag === "li") return `${children()}\n`;
-      if (tag === "hr") return "\n---\n";
-      if (tag === "table") {
-        const rows = [...node.querySelectorAll("tr")].map((tr) => [...tr.children].map((cell) => cleanText(cell.innerText || cell.textContent || "").replace(/\|/g, "\\|")));
-        if (!rows.length) return "";
-        const width = Math.max(...rows.map((r) => r.length));
-        const head = [...rows[0], ...Array(Math.max(0, width - rows[0].length)).fill("")];
-        const out = [`| ${head.join(" | ")} |`, `| ${Array(width).fill("---").join(" | ")} |`];
-        for (const row of rows.slice(1)) out.push(`| ${[...row, ...Array(Math.max(0, width - row.length)).fill("")].join(" | ")} |`);
-        return `\n${out.join("\n")}\n\n`;
-      }
-      if (tag === "details") {
-        const summary = node.querySelector(":scope > summary");
-        const label = safeInnerText(summary) || "Detalles";
-        const content = [...node.childNodes].filter((n) => n !== summary).map((n) => walk(n, depth + 1)).join("");
-        return `\n**${label}**\n\n${content}\n`;
-      }
-      if (tag === "button" || node.getAttribute("role") === "button") {
-        const label = cleanText(children()) || node.getAttribute("aria-label") || "";
-        return label ? `${label}\n` : "";
-      }
+      if (tag === 'button' || node.getAttribute('role')==='button') return (children().trim() || node.getAttribute('aria-label') || '')+'\n';
       return children();
     }
-    return cleanText(walk(root)).replace(/\n{3,}/g, "\n\n");
+    let result = walk(root).replace(/\n{4,}/g,'\n\n\n').trim();
+    result = result.replace(/OMNICHATPROTECTEDBLOCK(\d+)END/g,(_,n)=>protectedBlocks[Number(n)]);
+    return result;
   }
 
   function extractTurnSnapshot(el, options = {}) {
@@ -1202,6 +1193,7 @@
       media,
       interactive: extractInteractive(el),
       rawHtml: sanitized ? sanitized.outerHTML : null,
+      captureCoverage: {source:"visible_dom", fullConversationVerified:false, toolStreamsSeparated:false},
       domFingerprint: hashString(`${role}|${allText}|${codeBlocks.map((b) => b.hash).join(",")}|${expandables.map((e) => `${e.label}:${e.expanded}`).join("|")}`)
     };
   }
@@ -1245,10 +1237,13 @@
     if (!box) {
       box = document.createElement("div");
       box.id = "omnichat-export-toast";
-      box.innerHTML = '<div class="omnichat-title"></div><div class="omnichat-progress"></div>';
+      box.innerHTML = '<div class="omnichat-title"></div><div class="omnichat-progress"></div><button type="button" class="omnichat-cancel">Cancelar</button>';
+      box.querySelector('.omnichat-cancel').addEventListener('click',()=>{state.cancelled=true;box.querySelector('.omnichat-progress').textContent='Cancelando…';});
       document.documentElement.appendChild(box);
     }
     box.hidden = false;
+    const cancel=box.querySelector('.omnichat-cancel');
+    if(cancel)cancel.hidden=!state.exporting || /terminada|error|cancelada/.test(title);
     box.querySelector(".omnichat-title").textContent = title;
     box.querySelector(".omnichat-progress").textContent = progress;
   }
@@ -1325,17 +1320,12 @@
   }
 
   function riskyExpandableButton(button) {
-    if (!button) return true;
-    if (button.disabled || button.getAttribute("aria-disabled") === "true") return true;
-    if (button.closest("[role='toolbar'], [data-message-action-bar], nav, form, .chatgptbox-toolbar-container")) return true;
-    if (button.matches('[data-testid*="copy"], [data-testid*="clipboard"], [aria-label*="copy" i], [aria-label*="copiar" i]')) return true;
-    if (button.getAttribute("aria-haspopup")) return true;
-
-    const label = cleanText(`${button.getAttribute("aria-label") || ""} ${button.getAttribute("title") || ""} ${safeInnerText(button)}`).toLowerCase();
-    const riskWords = /\b(copy|copiar|clipboard|portapapeles|share|compartir|edit|editar|retry|reintentar|regenerate|regenerar|like|dislike|feedback|report|denunciar|delete|eliminar|download|descargar|open link|abrir enlace|previous|anterior|next|siguiente|more|más|menu|menú|options|opciones|actions|acciones)\b/i;
-    if (riskWords.test(label)) return true;
-    if (/message actions|acciones del mensaje|model selector|selector de modelo/.test(label)) return true;
-    return false;
+    if (!button || button.disabled || button.getAttribute('aria-disabled')==='true') return true;
+    if (button.closest("[role='toolbar'], [data-message-action-bar], nav, form, .chatgptbox-toolbar-container, [class*='group/artifact-row']")) return true;
+    if (button.getAttribute('aria-haspopup') || button.matches('.behavior-btn,[data-testid*="copy"],[data-testid*="clipboard"]')) return true;
+    const label=cleanText(`${button.getAttribute('aria-label')||''} ${button.getAttribute('title')||''} ${safeInnerText(button)}`);
+    // "Inspected exporters and created updated copy" is an activity, not Copy.
+    return /^(?:copy|copiar|clipboard|portapapeles|share|compartir|edit(?: message)?|editar|retry|reintentar|regenerate|regenerar|delete|eliminar|download|descargar|open file|abrir archivo|switch model|cambiar modelo|more actions|más acciones|menu|menú|like|dislike)\b/i.test(label);
   }
 
   function likelyDisclosureButton(button) {
@@ -1363,7 +1353,8 @@
     const restorers = [];
     const processed = new Set();
     let totalClicks = 0;
-    for (let pass = 0; pass < 3; pass += 1) {
+    for (let pass = 0; pass < 8; pass += 1) {
+      checkCancelled();
       let changed = 0;
       for (const turn of turns) {
         if (!turn?.isConnected) continue;
@@ -1377,7 +1368,7 @@
 
         const buttons = [...turn.querySelectorAll('button[aria-expanded="false"], [role="button"][aria-expanded="false"], button[data-state="closed"]')];
         for (const button of buttons) {
-          if (processed.has(button) || !likelyDisclosureButton(button) || totalClicks >= 60) continue;
+          if (processed.has(button) || !likelyDisclosureButton(button) || totalClicks >= 180) continue;
           processed.add(button);
           totalClicks += 1;
           const beforeExpanded = button.getAttribute("aria-expanded");
@@ -1395,8 +1386,7 @@
               changed += 1;
             } else {
               // Si el control no se comportó como disclosure, no lo volvemos a tocar.
-              if (beforeExpanded === "false") button.setAttribute("aria-expanded", "false");
-              if (beforeState === "closed") button.setAttribute("data-state", "closed");
+              state.diagnostics.push({kind:"disclosure-not-opened", label:safeInnerText(button)||button.getAttribute("aria-label"), beforeExpanded, beforeState});
             }
           } catch { /* noop */ }
         }
@@ -1496,6 +1486,8 @@
         mime,
         bytes,
         turnOrdinal: meta.turnOrdinal ?? null,
+        turnId: meta.turnId || null,
+        viewportRect: meta.viewportRect || null,
         tile: meta.tile ?? null,
         scrollTop: Number.isFinite(meta.scrollTop) ? meta.scrollTop : null
       });
@@ -1531,11 +1523,13 @@
     await wait(80);
 
     for (let tile = 1; tile <= perTurnLimit && state.visualSnapshots.length < MAX_VISUAL_SNAPSHOTS; tile += 1) {
+      checkCancelled();
       const metrics = scrollMetrics(scroller);
+      const r=turn.getBoundingClientRect();
       const ok = await captureVisualEvidence(
         `Turno ${ordinal} de ${total} · vista ${tile}`,
         warnings,
-        { turnOrdinal: ordinal, tile, scrollTop: metrics.top }
+        { turnOrdinal: ordinal, turnId:stableTurnId(turn), tile, scrollTop: metrics.top, viewportRect:{turnTop:r.top,turnBottom:r.bottom,height:innerHeight} }
       );
       if (!ok) break;
       captured += 1;
@@ -1551,6 +1545,10 @@
       const after = scrollMetrics(scroller).top;
       if (Math.abs(after - before) < 2) break;
     }
+    const finalRect=turn.getBoundingClientRect();
+    const reachedBottom=finalRect.bottom <= innerHeight-24;
+    state.visualCoverage.push({turnId:stableTurnId(turn),captures:captured,reachedBottom,limited:!reachedBottom,innerScrollAreasFullyCaptured:false});
+    if(!reachedBottom) warnings.push(`Capturas parciales del turno ${ordinal}: se alcanzó el presupuesto o no se pudo continuar. El texto DOM se conserva por separado.`);
     return captured;
   }
 
@@ -1561,29 +1559,32 @@
   }
 
   async function capturePersistentChatGptShells(map, options, warnings, orderMap, nextOrderRef) {
-    const shells = chatGptPersistentShells();
-    if (shells.length < 2) return { used: false, total: shells.length, missed: 0 };
-
-    state.diagnostics.push({ kind: "capture-strategy", strategy: "chatgpt-persistent-shells", shellCount: shells.length, timestamp: new Date().toISOString() });
-    let missed = 0;
-    for (let i = 0; i < shells.length; i += 1) {
-      const shell = shells[i];
-      try { shell.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" }); }
-      catch { try { shell.scrollIntoView(); } catch { /* noop */ } }
-      await wait(120);
-      const mounted = await waitForTurnMount(shell, 1500);
-      const restorers = options.expandCollapsed && mounted ? await expandTurnsSafely([shell]) : [];
-      const captured = await captureElementInto(map, shell, options, orderMap, nextOrderRef);
-      if (!captured) missed += 1;
-
-      if (options.visualEvidence && options.format === "zip" && shouldCaptureVisual(i, shells.length)) {
-        await captureTurnVisualEvidence(shell, i + 1, shells.length, warnings);
-      }
-      if (restorers.length) await restoreExpanded(restorers);
-      const percent = Math.round(((i + 1) / shells.length) * 100);
-      toast("OmniChat: capturando conversación", `${map.size}/${shells.length} turnos recuperados · ${percent}%`);
+    let shells=chatGptPersistentShells();
+    if(shells.length<2) return {used:false,total:shells.length,missed:0};
+    const visited=new Set(); let missed=0; let steps=0;
+    state.diagnostics.push({kind:'capture-strategy',strategy:'mixed-shells-dynamic',initialShellCount:shells.length,timestamp:new Date().toISOString()});
+    while(steps<MAX_SCAN_STEPS) {
+      checkCancelled();
+      shells=chatGptPersistentShells();
+      const shell=shells.find(n=>!visited.has(stableTurnId(n)));
+      if(!shell) break;
+      const id=stableTurnId(shell); visited.add(id); steps++;
+      shell.scrollIntoView({block:'start',inline:'nearest',behavior:'instant'});
+      await wait(180);
+      const mounted=await waitForTurnMount(shell,2200);
+      let restorers=[];
+      try {
+        if(options.expandCollapsed && mounted) restorers=await expandTurnsSafely([shell]);
+        if(!await captureElementInto(map,shell,options,orderMap,nextOrderRef)) missed++;
+        if(options.visualEvidence && options.format==='zip') await captureTurnVisualEvidence(shell,shells.indexOf(shell)+1,shells.length,warnings);
+        // Capture once more after visual scrolling to retain newly rendered code.
+        await captureElementInto(map,shell,options,orderMap,nextOrderRef);
+      } finally {await restoreExpanded(restorers);}
+      toast('OmniChat: capturando conversación',`${visited.size} turnos recorridos · ${map.size} conservados`);
     }
-    return { used: true, total: shells.length, missed };
+    state.diagnostics.push({kind:'shell-scan-result',detected:chatGptPersistentShells().length,visited:visited.size,missed,limitReached:steps>=MAX_SCAN_STEPS});
+    if(steps>=MAX_SCAN_STEPS) warnings.push('Se alcanzó el límite de recorrido. La cobertura es parcial.');
+    return {used:true,total:visited.size,missed};
   }
 
   async function deepCapture(options, warnings) {
@@ -1619,6 +1620,7 @@
       let lastTop = -1;
       let repeated = 0;
       while (steps < (options.deepScan ? MAX_SCAN_STEPS : 1)) {
+        checkCancelled();
         const currentTurns = getTurnElements().filter((turn) => cleanText(turn.textContent || "") || turn.querySelector?.("pre,img,video,audio,canvas,[data-message-author-role]"));
         const restorers = options.expandCollapsed ? await expandTurnsSafely(currentTurns) : [];
         await captureCurrentInto(map, options, orderMap, nextOrderRef);
@@ -1703,34 +1705,46 @@
     }
   }
 
-  async function fetchResource(url, timeoutMs = RESOURCE_FETCH_TIMEOUT_MS) {
-    if (!url) throw new Error("URL vacía");
-    if (url.startsWith("data:")) {
-      const comma = url.indexOf(",");
-      if (comma < 0) throw new Error("Data URL inválida");
-      const head = url.slice(5, comma);
-      const body = url.slice(comma + 1);
-      const isBase64 = /;base64/i.test(head);
-      const mime = head.split(";")[0] || "application/octet-stream";
-      const binary = isBase64 ? atob(body) : decodeURIComponent(body);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) & 255;
-      return { bytes, mime };
+  async function fetchResource(url, maxBytes, timeoutMs = RESOURCE_FETCH_TIMEOUT_MS) {
+    checkCancelled();
+    if(!url) throw new Error('URL vacía');
+    if(url.startsWith('data:')) {
+      const {bytes,mime}=dataUrlToBytes(url);
+      if(bytes.byteLength>maxBytes) throw new Error('Supera el límite de recursos');
+      return {bytes:normalizedBytes(bytes),mime};
     }
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs));
+    const parsed=new URL(url,location.href);
+    if(!['https:','blob:'].includes(parsed.protocol)) throw new Error('Protocolo de recurso no permitido');
+    if(parsed.protocol==='https:' && parsed.origin!==location.origin) {
+      const reply=await browser.runtime.sendMessage({type:'OMNICHAT_FETCH_RESOURCE',url:parsed.href,maxBytes});
+      if(!reply?.ok) throw new Error(reply?.error||'No se pudo descargar el recurso externo');
+      return {bytes:normalizedBytes(reply.buffer),mime:reply.mime};
+    }
+    const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),timeoutMs);
     try {
-      const response = await fetch(url, { credentials: "include", cache: "force-cache", redirect: "follow", signal: controller.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const buffer = await response.arrayBuffer();
-      return { bytes: new Uint8Array(buffer), mime: response.headers.get("content-type") || "application/octet-stream" };
-    } catch (error) {
-      if (error?.name === "AbortError") throw new Error(`timeout de ${Math.round(timeoutMs / 1000)} s`);
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
+      const response=await fetch(url,{credentials:'include',cache:'force-cache',signal:controller.signal});
+      if(!response.ok) throw new Error(`HTTP ${response.status}`);
+      if(Number(response.headers.get('content-length'))>maxBytes) throw new Error('Supera el límite de recursos');
+      const reader=response.body.getReader(); const chunks=[];let total=0;
+      try {
+        while(true) {checkCancelled();const {done,value}=await reader.read();if(done)break;
+          total+=value.byteLength;
+          if(total>maxBytes) throw new Error('Supera el límite de recursos');
+          chunks.push(normalizedBytes(value));
+        }
+      } catch(error) {await reader.cancel().catch(()=>{});throw error;}
+      return {bytes:concatBytes(chunks),mime:response.headers.get('content-type')||'application/octet-stream'};
+    } finally {clearTimeout(timer);}
+  }
+
+  function validateResource(bytes,mime,name,expectedSize) {
+    if(expectedSize && bytes.byteLength!==expectedSize) throw new Error(`Tamaño inesperado: ${bytes.byteLength}, esperado ${expectedSize}`);
+    const head=Array.from(bytes.subarray(0,8));
+    if(/\.png$/i.test(name) && head.join(',')!=='137,80,78,71,13,10,26,10') throw new Error('El recurso no contiene una cabecera PNG válida');
+    if(/\.(?:zip|xpi|docx|xlsx|pptx)$/i.test(name) && !(head[0]===80 && head[1]===75 && [3,5,7].includes(head[2]))) throw new Error('El recurso no contiene una cabecera ZIP válida');
+    if(/\.jpe?g$/i.test(name) && !(head[0]===255 && head[1]===216 && head[2]===255)) throw new Error('El recurso no contiene una cabecera JPEG válida');
+    if(/\.pdf$/i.test(name) && String.fromCharCode(...head.slice(0,5))!=='%PDF-') throw new Error('El recurso no contiene una cabecera PDF válida');
+    if(/text\/html/i.test(mime) && !/\.html?$/i.test(name)) throw new Error('El servidor devolvió HTML en lugar del archivo esperado');
   }
 
   function collectResourceRequests(turns, options) {
@@ -1739,7 +1753,7 @@
     if (options.archiveAssets) {
       for (const turn of turns) {
         for (const item of turn.media) {
-          if (!item.url || seen.has(item.url)) continue;
+          if (!item.url || item.decorative || seen.has(item.url)) continue;
           seen.add(item.url);
           requests.push({ url: item.url, type: item.kind || "media", suggestedName: item.alt || item.title || null });
         }
@@ -1750,7 +1764,7 @@
         for (const item of turn.files) {
           if (!item.href || seen.has(item.href)) continue;
           seen.add(item.href);
-          requests.push({ url: item.href, type: "file", suggestedName: item.downloadName || item.text || null });
+          requests.push({ url: item.href, type: "file", expectedSize:item.expectedSize||null, suggestedName: item.downloadName || item.text || null });
         }
       }
     }
@@ -1763,14 +1777,19 @@
     const archived = new Map();
     let total = 0;
     let index = 1;
+    const ledger=[];
     for (const req of requests) {
+      checkCancelled();
       if (total >= maxTotal) {
         warnings.push(`Se alcanzó el límite total de recursos (${options.assetLimitMb || 200} MB).`);
-        break;
+        ledger.push({url:sanitizeExternalUrlForMetadata(req.url),status:"budget_exceeded"});
+        continue;
       }
       toast("OmniChat: archivando recursos", `${archived.size}/${requests.length} completados · ${Math.round(total / 1024 / 1024)} MB`);
       try {
-        const { bytes, mime } = await fetchResource(req.url);
+        const { bytes, mime } = await fetchResource(req.url, maxTotal-total);
+        validateResource(bytes,mime,req.suggestedName||basenameFromUrl(req.url,""),req.expectedSize);
+        const sha256=await sha256Bytes(bytes);
         if (total + bytes.byteLength > maxTotal) {
           warnings.push(`Se omitió un recurso de ${Math.round(bytes.byteLength / 1024 / 1024)} MB porque superaría el límite configurado.`);
           continue;
@@ -1786,15 +1805,18 @@
           localPath,
           mime,
           size: bytes.byteLength,
+          sha256,
           bytes
         });
         total += bytes.byteLength;
+        ledger.push({url:sanitizeExternalUrlForMetadata(req.url),status:"archived",localPath,size:bytes.byteLength,sha256});
         index += 1;
       } catch (error) {
+        ledger.push({url:sanitizeExternalUrlForMetadata(req.url),status:"failed",error:String(error.message||error)});
         warnings.push(`No se pudo archivar ${sanitizeExternalUrlForMetadata(req.url)} (${error.message || error}).`);
       }
     }
-    return { archived, totalBytes: total, requested: requests.length };
+    return { archived, totalBytes: total, requested: requests.length, ledger };
   }
 
   function bytesToDataUrl(bytes, mime) {
@@ -1806,26 +1828,22 @@
     return `data:${mime || "application/octet-stream"};base64,${btoa(binary)}`;
   }
 
-  function rewriteRawHtml(rawHtml, archived, mode = "zip") {
-    if (!rawHtml) return "";
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(`<body>${rawHtml}</body>`, "text/html");
-    for (const node of doc.querySelectorAll("[src],[href],[poster]")) {
-      for (const attr of ["src", "href", "poster"]) {
-        const value = node.getAttribute(attr);
-        if (!value) continue;
-        const abs = absoluteUrl(value);
-        const resource = archived.get(abs) || [...archived.values()].find((r) => r.urlForMetadata === sanitizeExternalUrlForMetadata(abs));
-        if (resource) {
-          node.setAttribute(attr, mode === "single" ? bytesToDataUrl(resource.bytes, resource.mime) : resource.localPath);
-        } else if ((attr === "src" || attr === "poster") && /^https?:/i.test(abs)) {
-          node.setAttribute("data-omnichat-original-url", sanitizeExternalUrlForMetadata(abs));
-        }
+  function rewriteRawHtml(rawHtml, archived, mode = 'zip') {
+    if(!rawHtml)return '';
+    const doc=new DOMParser().parseFromString(`<body>${rawHtml}</body>`,'text/html');
+    for(const node of doc.querySelectorAll('[src],[href],[poster],[xlink\\:href]')) {
+      for(const attr of ['src','href','poster','xlink:href']) {
+        const value=node.getAttribute(attr);if(!value)continue;
+        const abs=absoluteUrl(value);
+        const res=[...archived.values()].find(r=>r.url===abs||r.urlForMetadata===sanitizeExternalUrlForMetadata(abs)||r.localPath===value);
+        if(res)node.setAttribute(attr,mode==='single'?bytesToDataUrl(res.bytes,res.mime):encodeURI(res.localPath));
+        else if(attr==='src'||attr==='poster'||node.tagName.toLowerCase()==='use') {
+          node.setAttribute('data-omnichat-original-url',sanitizeExternalUrlForMetadata(abs));
+          node.removeAttribute(attr);
+          if(node.tagName==='IMG' && !node.getAttribute('alt'))node.setAttribute('alt','Recurso no archivado');
+        } else node.setAttribute(attr,sanitizeExternalUrlForMetadata(abs));
       }
-      if (node.tagName === "A") {
-        node.setAttribute("target", "_blank");
-        node.setAttribute("rel", "noopener noreferrer");
-      }
+      if(node.tagName==='A') {node.setAttribute('rel','noopener noreferrer');node.setAttribute('target','_blank');}
     }
     return doc.body.innerHTML;
   }
@@ -1846,7 +1864,8 @@
       url: r.urlForMetadata,
       localPath: r.localPath,
       mime: r.mime,
-      size: r.size
+      size: r.size,
+      sha256:r.sha256
     }));
     return {
       schema: "omnichat-complete-export",
@@ -1866,6 +1885,15 @@
       },
       summary: summarizeTurns(turns, events, resources),
       sourceLayer,
+      completeness: {
+        certifiedComplete: false,
+        source: "visible_dom_with_optional_visible_file_resolution",
+        unresolvedFiles: turns.reduce((n,t)=>n+(t.files||[]).filter(f=>f.archiveStatus!=="archived").length,0),
+        visualCoverage: "bounded_viewport_samples_not_full_page_or_inner_scroll_capture",
+        historicalEvents: "observed_in_this_tab_only"
+      },
+      resourceLedger: resourceInfo.ledger || [],
+      visualCoverage: state.visualCoverage,
       turns: turns.map((turn, i) => ({
         ...turn,
         ordinal: i + 1,
@@ -1881,7 +1909,9 @@
         label: shot.label,
         capturedAt: shot.capturedAt,
         mime: shot.mime,
-        turnOrdinal: shot.turnOrdinal ?? null,
+        turnOrdinal: shot.turnId ? turns.findIndex(t=>t.id===shot.turnId)+1 : shot.turnOrdinal ?? null,
+        turnId:shot.turnId||null,
+        viewportRect:shot.viewportRect||null,
         tile: shot.tile ?? null,
         scrollTop: shot.scrollTop ?? null,
         localPath: `visual/viewport-${String(shot.index).padStart(4, "0")}.jpg`,
@@ -1921,90 +1951,44 @@
   }
 
   function buildMarkdown(conversation, archived, zipMode = false) {
-    const lines = [
-      `# ${conversation.metadata.title}`,
-      "",
-      `- Plataforma: ${conversation.metadata.platformLabel}`,
-      `- Exportado: ${conversation.metadata.exportedAt}`,
-      `- URL: ${conversation.metadata.sourceUrl}`,
-      `- Turnos: ${conversation.summary.turns}`,
-      `- Ejecuciones/CLI detectadas: ${conversation.summary.terminalExecutions}`,
-      "",
-      "---",
-      ""
-    ];
-
-    for (const turn of conversation.turns) {
-      lines.push(`## ${turn.ordinal}. ${markdownRole(turn.role)}`);
-      if (turn.model) lines.push(`_Modelo visible: ${turn.model}_`, "");
-      let body = turn.markdown || turn.text || "";
-      if (zipMode && archived.size) {
-        for (const [url, res] of archived) { body = body.split(url).join(res.localPath); body = body.split(res.urlForMetadata).join(res.localPath); }
-      }
-      lines.push(body || "_(sin texto)_", "");
-
-      if (turn.toolExecutions?.length) {
-        lines.push("### Ejecuciones de herramienta / CLI estructuradas", "");
-        for (const execution of turn.toolExecutions) {
-          lines.push(`- ${execution.tool || "Herramienta"} · ${execution.status || "estado desconocido"}`);
-          lines.push("", "```sh", execution.command || "", "```", "");
-          if (execution.output) lines.push("Salida visible:", "", "```text", execution.output, "```", "");
+    const lines=[`# ${conversation.metadata.title}`,'',`Plataforma: ${conversation.metadata.platformLabel}`,`Captura: ${conversation.metadata.exportedAt}`,
+      `Turnos conservados: ${conversation.turns.length}. La cobertura completa no está certificada.`,''];
+    for(const turn of conversation.turns) {
+      lines.push(`## ${turn.ordinal}. ${markdownRole(turn.role)}`,'');
+      let body=turn.markdown||turn.text||'';
+      if(zipMode) for(const r of archived.values()) for(const url of [r.url,r.urlForMetadata].filter(Boolean)) body=body.split(url).join(encodeURI(r.localPath));
+      lines.push(body,'');
+      if(turn.files?.length) {
+        lines.push('### Archivos','');
+        for(const file of turn.files) {
+          const res=[...archived.values()].find(r=>r.url===file.href||r.urlForMetadata===file.href||r.localPath===file.localPath);
+          const label=file.downloadName||file.text||'archivo';
+          const href=zipMode&&res?encodeURI(res.localPath).replace(/\(/g,'%28').replace(/\)/g,'%29'):file.href;
+          lines.push(href?`[${label}](${href})${res?'':' — sin copia local'}`:`${label} — referencia sin copia local`);
         }
       }
-      if (turn.files?.length) {
-        lines.push("### Archivos / adjuntos visibles", "");
-        for (const file of turn.files) {
-          const label = file.downloadName || file.text || file.fileId || "archivo";
-          const href = file.href || "";
-          lines.push(href ? `- [${label}](${href})` : `- ${label} (${file.kind || "archivo"}; referencia visible sin URL directa)`);
-        }
-        lines.push("");
-      }
-      if (turn.activities.length) {
-        lines.push("### Actividad / herramientas visibles", "");
-        for (const activity of turn.activities) lines.push(`- ${activity.text.replace(/\n/g, " ")}`);
-        lines.push("");
-      }
-      lines.push("---", "");
+      lines.push('','---','');
     }
-    if (conversation.warnings.length) {
-      lines.push("## Advertencias de exportación", "");
-      for (const warning of conversation.warnings) lines.push(`- ${warning}`);
-      lines.push("");
-    }
-    return lines.join("\n");
+    if(conversation.warnings?.length) lines.push('## Advertencias','',...conversation.warnings.map(w=>'- '+w),'');
+    return lines.join('\n');
   }
 
   function buildCommandsMarkdown(conversation) {
-    const lines = [`# Comandos, ejecuciones y código — ${conversation.metadata.title}`, ""];
-    let execNo = 0;
-    let codeNo = 0;
-
-    lines.push("## Ejecuciones reales visibles de herramientas / CLI", "");
-    for (const turn of conversation.turns) {
-      for (const execution of turn.toolExecutions || []) {
-        execNo += 1;
-        lines.push(`### Ejecución ${execNo} · Turno ${turn.ordinal} · ${markdownRole(turn.role)}`);
-        lines.push(`- Herramienta visible: ${execution.tool || "desconocida"}`);
-        lines.push(`- Estado inferido: ${execution.status || "desconocido"}`);
-        lines.push("", "#### Comando", "", "```sh", execution.command || "", "```", "");
-        lines.push("#### Salida visible", "", "```text", execution.output || "(sin salida textual)", "```", "");
-      }
+    const lines=[`# Comandos y código — ${conversation.metadata.title}`,'',
+      'Los paneles de herramientas se identifican por su estructura DOM. La salida combinada no permite distinguir stdout de stderr ni confirmar un código de salida.','',
+      '## Paneles de ejecución identificados',''];
+    let n=0;
+    for(const turn of conversation.turns) for(const e of turn.toolExecutions||[]) {
+      lines.push(`### ${++n}. Turno ${turn.ordinal} · ${e.tool}`,'',`Estado de captura: ${e.status}`,'','#### Comando / entrada','',fenced(e.command,e.commandLanguage),'','#### Salida visible','',fenced(e.output||'', 'text'),'');
     }
-    if (!execNo) lines.push("No se detectaron ejecuciones reales de herramientas/CLI.", "");
-
-    lines.push("## Otros bloques de código visibles", "");
-    for (const turn of conversation.turns) {
-      for (const block of turn.codeBlocks || []) {
-        if (["inline_code", "tool_command", "tool_output"].includes(block.kind)) continue;
-        codeNo += 1;
-        lines.push(`### Código ${codeNo} · Turno ${turn.ordinal} · ${markdownRole(turn.role)} · ${block.kind}`);
-        if (block.label) lines.push(`Etiqueta/contexto: ${block.label}`);
-        lines.push("", `\`\`\`${block.language === "text" ? "" : block.language || ""}`, block.text, "```", "");
-      }
+    if(!n) lines.push('No se identificaron paneles de ejecución.','');
+    lines.push('## Otros bloques de código (incluye ejemplos; no implica ejecución)','');
+    n=0;
+    for(const turn of conversation.turns) for(const block of turn.codeBlocks||[]) {
+      if(['inline_code','tool_command','tool_output'].includes(block.kind))continue;
+      lines.push(`### ${++n}. Turno ${turn.ordinal} · ${block.language||'texto'}`,'',fenced(block.text,block.language),'');
     }
-    if (!codeNo) lines.push("No se detectaron otros bloques de código.", "");
-    return lines.join("\n");
+    return lines.join('\n');
   }
 
   function viewerCss() {
@@ -2013,40 +1997,24 @@
 `;
   }
 
-  function buildHtml(conversation, archived, mode = "zip") {
-    const single = mode === "single";
-    const turnsHtml = conversation.turns.map((turn) => {
-      const raw = turn.rawHtml ? rewriteRawHtml(turn.rawHtml, archived, single ? "single" : "zip") : `<pre>${escapeHtml(turn.text)}</pre>`;
-      const detailPayload = escapeHtml(JSON.stringify({
-        activities: turn.activities,
-        expandables: turn.expandables,
-        toolExecutions: turn.toolExecutions || [],
-        codeBlocks: turn.codeBlocks,
-        files: turn.files || [],
-        links: turn.links.map((l) => ({ ...l, href: undefined })),
-        media: turn.media.map((m) => ({ ...m, url: undefined }))
-      }, null, 2));
-      return `<section class="turn ${escapeHtml(turn.role)}" id="turn-${turn.ordinal}">
-  <div class="turn-head"><span class="role">${escapeHtml(markdownRole(turn.role))} · ${turn.ordinal}</span><span class="model">${escapeHtml(turn.model || "")}</span></div>
-  <div class="snapshot">${raw}</div>
-  <details class="details"><summary>Metadatos estructurados del turno</summary><pre>${detailPayload}</pre></details>
-</section>`;
-    }).join("\n");
-
-    const stats = conversation.summary;
-    const warningsHtml = conversation.warnings.length
-      ? `<section class="hero"><h2>Advertencias</h2>${conversation.warnings.map((w) => `<div class="warning">${escapeHtml(w)}</div>`).join("")}</section>`
-      : "";
-
-    return `<!doctype html>
-<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(conversation.metadata.title)} — OmniChat Export</title><style>${viewerCss()}</style></head>
-<body><main class="wrap">
-<section class="hero"><h1>${escapeHtml(conversation.metadata.title)}</h1><div class="meta"><span>${escapeHtml(conversation.metadata.platformLabel)}</span><span>${escapeHtml(conversation.metadata.exportedAt)}</span><span>${escapeHtml(conversation.metadata.sourceUrl)}</span></div>
-<div class="stats"><div class="stat"><b>${stats.turns}</b><span>turnos</span></div><div class="stat"><b>${stats.codeBlocks}</b><span>bloques de código</span></div><div class="stat"><b>${stats.terminalExecutions}</b><span>ejecuciones reales CLI</span></div><div class="stat"><b>${stats.activities}</b><span>actividades</span></div><div class="stat"><b>${stats.linkedFiles}</b><span>archivos visibles</span></div><div class="stat"><b>${stats.resolvedFiles || 0}</b><span>archivos resolubles</span></div><div class="stat"><b>${stats.media}</b><span>medios</span></div><div class="stat"><b>${stats.archivedResources}</b><span>recursos archivados</span></div><div class="stat"><b>${stats.visualSnapshots || 0}</b><span>capturas visuales</span></div></div></section>
-${warningsHtml}
-${turnsHtml}
-<div class="footer">Exportado localmente con OmniChat Complete Exporter ${VERSION}. La instantánea conserva contenido recibido por el navegador; no incluye información privada del servidor que nunca haya sido mostrada o enviada a la página.</div>
-</main></body></html>`;
+  function buildHtml(conversation, archived, mode = 'zip') {
+    const esc=escapeHtml;
+    const single=mode==='single';
+    const localResource=file=>[...archived.values()].find(r=>r.url===file.href||r.urlForMetadata===file.href||r.localPath===file.localPath);
+    const turns=conversation.turns.map(turn=>{
+      const raw=turn.rawHtml?rewriteRawHtml(turn.rawHtml,archived,mode):`<pre>${esc(turn.text)}</pre>`;
+      const files=(turn.files||[]).map(file=>{
+        const resource=localResource(file);const name=file.downloadName||file.text||'Archivo';
+        if(resource) {const href=single?bytesToDataUrl(resource.bytes,resource.mime):encodeURI(resource.localPath);return `<li><a download="${esc(name)}" href="${esc(href)}">${esc(name)}</a> — ${resource.size.toLocaleString('es-ES')} bytes</li>`;}
+        return `<li>${esc(name)} — <strong>sin copia local</strong></li>`;
+      }).join('');
+      const executions=(turn.toolExecutions||[]).map((e,i)=>`<details class="execution"><summary>${i+1}. ${esc(e.tool)} · ${esc(e.status)}</summary><h4>Entrada</h4><pre>${esc(e.command)}</pre><h4>Salida visible combinada</h4><pre>${esc(e.output||'')}</pre></details>`).join('');
+      return `<section class="turn ${esc(turn.role)}" id="turn-${turn.ordinal}"><header class="turn-head"><b>${turn.ordinal}. ${esc(markdownRole(turn.role))}</b><span>${esc(turn.model||'')}</span></header><div class="snapshot">${raw}</div>${files?`<div class="files"><h3>Archivos de este turno</h3><ul>${files}</ul></div>`:''}${executions?`<details class="details"><summary>${turn.toolExecutions.length} paneles de ejecución estructurados</summary>${executions}</details>`:''}<details class="details"><summary>Datos estructurados</summary><pre>${esc(JSON.stringify({activities:turn.activities,files:turn.files,codeBlocks:turn.codeBlocks,toolExecutions:turn.toolExecutions},null,2))}</pre></details></section>`;
+    }).join('\n');
+    const snapshots=single?'':(conversation.visualEvidence||[]).map(s=>`<a href="${esc(encodeURI(s.localPath))}" target="_blank" rel="noopener">Vista ${s.index}${s.turnOrdinal?` · turno ${s.turnOrdinal}`:''}</a>`).join(' · ');
+    const s=conversation.summary;
+    const css=viewerCss()+'.files{padding:0 16px 16px}.files li{margin:8px 0}a{color:#a7c8ff}.execution{margin:12px 0}.execution pre{white-space:pre;overflow:auto;background:#090c11;padding:12px;max-height:600px}details>summary{cursor:pointer}.snapshot [role="toolbar"],.snapshot [data-message-action-bar]{display:none}.snapshot svg{max-width:24px;max-height:24px}.snapshot pre pre{border:0;padding:0}.snapshot button{font:inherit;color:inherit;background:transparent;border:0;text-align:left}.details>pre{max-height:600px;overflow:auto}.coverage{margin:16px 0;padding:12px;background:#262013;border:1px solid #82672c;border-radius:8px}.snapshot [hidden]{display:block!important}';
+    return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><title>${esc(conversation.metadata.title)} — OmniChat</title><style>${css}</style></head><body><main class="wrap"><section class="hero"><h1>${esc(conversation.metadata.title)}</h1><p>${esc(conversation.metadata.platformLabel)} · ${esc(conversation.metadata.exportedAt)}</p><p>${s.turns} turnos · ${s.toolExecutions} paneles de ejecución · ${s.archivedResources} recursos locales · ${s.visualSnapshots||0} capturas</p><div class="coverage">El archivo conserva lo capturado. Los paneles no cargados, los archivos sin copia local y las capturas limitadas se señalan en el informe. No certifica la recuperación de todo el contenido de la conversación.</div><nav>${conversation.turns.map(t=>`<a href="#turn-${t.ordinal}">${t.ordinal}. ${esc(markdownRole(t.role))}</a>`).join(' · ')}</nav></section>${conversation.warnings?.length?`<details class="hero"><summary>${conversation.warnings.length} advertencias de captura</summary><ul>${conversation.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}${turns}${snapshots?`<section class="hero"><h2>Capturas de respaldo (cobertura parcial)</h2><p>${snapshots}</p></section>`:''}<footer class="footer">OmniChat ${VERSION}. Archivo local sin scripts activos ni carga automática de recursos de terceros. Los archivos adjuntos conservan su contenido original; pueden contener información confidencial.</footer></main></body></html>`;
   }
 
   function buildReport(conversation, resourceInfo) {
@@ -2075,6 +2043,9 @@ ${turnsHtml}
       `Capturas visuales de respaldo: ${s.visualSnapshots || 0}`,
       `Bytes archivados: ${resourceInfo.totalBytes}`,
       `Enriquecimiento ChatGPT: ${conversation.sourceLayer?.status || "no aplicable"}`,
+      "Cobertura completa de la conversación: no certificada",
+      "stdout/stderr/códigos de salida: no se infieren del texto de salida",
+      `Archivos sin copia local: ${conversation.turns.reduce((n,t)=>n+(t.files||[]).filter(f=>f.archiveStatus!=="archived").length,0)}`,
       `Referencias de archivo encontradas en capa fuente: ${conversation.sourceLayer?.referencesFound || 0}`,
       `Referencias visibles emparejadas: ${conversation.sourceLayer?.visibleReferencesMatched || 0}`,
       `URLs de descarga resueltas: ${conversation.sourceLayer?.downloadUrlsResolved || 0}`,
@@ -2161,13 +2132,16 @@ ${turnsHtml}
   }
 
   function createZip(files) {
+    if(files.length>65535 || new Set(files.map(f=>f.name)).size!==files.length) throw new Error("Entradas ZIP duplicadas o demasiadas entradas.");
     const locals = [];
     const centrals = [];
     let offset = 0;
     const dt = dosDateTime(new Date());
     for (const file of files) {
       const nameBytes = encoder.encode(file.name);
-      const data = file.data instanceof Uint8Array ? file.data : encoder.encode(String(file.data));
+      const data = normalizedBytes(file.data);
+      if(data.byteLength>0xffffffff || offset+data.byteLength>0xffffffff) throw new Error("El ZIP supera el límite ZIP32.");
+      if(!file.name || file.name.startsWith("/") || file.name.split("/").includes("..")) throw new Error("Nombre ZIP no válido.");
       const crc = crc32(data);
       const localHeader = zipFileHeader(nameBytes, data, crc, dt);
       locals.push(localHeader, nameBytes, data);
@@ -2191,6 +2165,7 @@ ${turnsHtml}
   }
 
   async function downloadBlob(blob, filename) {
+    checkCancelled();
     const url = URL.createObjectURL(blob);
     try {
       const result = await browser.runtime.sendMessage({ type: "OMNICHAT_DOWNLOAD_URL", url, filename });
@@ -2218,8 +2193,11 @@ ${turnsHtml}
   }
 
   async function performExport(rawOptions = {}) {
+    ensureCurrentConversation();
     if (state.exporting) throw new Error("Ya hay una exportación en curso.");
     state.exporting = true;
+    state.cancelled = false;
+    state.visualCoverage = [];
     state.visualSnapshots = [];
     state.diagnostics = [{
       kind: "export-start",
@@ -2245,7 +2223,9 @@ ${turnsHtml}
     const warnings = [];
     try {
       toast("OmniChat: preparando exportación", "Detectando conversación…");
-      const turns = await deepCapture(options, warnings);
+      let turns;
+      const initialScroller=findScrollContainer(), initialTop=initialScroller.scrollTop;
+      try {turns = await deepCapture(options, warnings);} finally {setScrollTop(initialScroller,initialTop);}
       if (!turns.length) throw new Error("No se detectaron turnos de conversación en esta página.");
 
       toast("OmniChat: resolviendo adjuntos", "Buscando referencias visibles de archivos…");
@@ -2255,6 +2235,14 @@ ${turnsHtml}
         ? await archiveResources(turns, options, warnings)
         : { archived: new Map(), totalBytes: 0, requested: 0 };
 
+      for(const turn of turns) {
+        for(const file of turn.files||[]) {
+          const res=file.href ? resourceInfo.archived.get(file.href) : null;
+          file.archiveStatus=res?'archived':!file.href?'unresolved':'not_archived';
+          file.localPath=res?.localPath||null;
+          if(!res) warnings.push(`Archivo sin copia local: ${file.downloadName||file.text||'sin nombre'} (${file.archiveStatus}).`);
+        }
+      }
       const conversation = buildConversationObject(turns, options, resourceInfo, warnings, sourceLayer);
       const base = exportBaseName();
       toast("OmniChat: generando archivo", `${conversation.summary.turns} turnos · ${conversation.summary.codeBlocks} bloques de código`);
@@ -2283,10 +2271,22 @@ ${turnsHtml}
         if (state.visualSnapshots.length) files.push({ name: "visual/index.json", data: JSON.stringify(conversation.visualEvidence, null, 2) });
         if (options.rawDom) {
           for (const turn of conversation.turns) {
-            if (turn.rawHtml) files.push({ name: `raw/turn-${String(turn.ordinal).padStart(4, "0")}-${turn.role}.html`, data: turn.rawHtml });
+            if (turn.rawHtml) {
+              const local = rewriteRawHtml(turn.rawHtml, resourceInfo.archived, "zip").replace(/(src|href|poster)="(assets|files)\//g, '$1="../$2/');
+              const rawDocument = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; media-src 'self' data:; style-src 'unsafe-inline'; script-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'"><title>Turno ${turn.ordinal}</title>${local}`;
+              files.push({ name: `raw/turn-${String(turn.ordinal).padStart(4, "0")}-${turn.role}.html`, data: rawDocument });
+            }
           }
         }
         for (const res of resourceInfo.archived.values()) files.push({ name: res.localPath, data: res.bytes });
+        const integrity=[];
+        for(const file of files) {
+          checkCancelled();
+          const bytes=normalizedBytes(file.data);
+          integrity.push({path:file.name,bytes:bytes.byteLength,sha256:await sha256Bytes(bytes)});
+        }
+        files.push({name:'integrity.json',data:JSON.stringify({algorithm:'SHA-256',scope:'all_other_entries_except_integrity_and_SHA256SUMS',entries:integrity},null,2)});
+        files.push({name:'SHA256SUMS.txt',data:integrity.map(e=>`${e.sha256}  ${e.path}`).join('\n')+'\n'});
         const zipBytes = createZip(files);
         filename = `${base}.zip`;
         await downloadBlob(new Blob([zipBytes], { type: "application/zip" }), filename);
@@ -2375,6 +2375,7 @@ ${turnsHtml}
   function startObserver() {
     if (state.observer) return;
     state.observer = new MutationObserver((mutations) => {
+      try {ensureCurrentConversation();} catch {return;}
       const touched = new Set();
       for (const mutation of mutations) {
         const targetEl = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement;
@@ -2396,7 +2397,7 @@ ${turnsHtml}
         if (old) clearTimeout(old);
         const timer = setTimeout(() => {
           state.liveTimers.delete(turn);
-          if (turn.isConnected) captureLiveEvent(turn);
+          if (turn.isConnected && state.navigationKey===location.origin+location.pathname) captureLiveEvent(turn);
         }, 900);
         state.liveTimers.set(turn, timer);
       }
@@ -2407,7 +2408,8 @@ ${turnsHtml}
 
   browser.runtime.onMessage.addListener((message) => {
     if (!message || typeof message !== "object") return undefined;
-    if (message.type === "OMNICHAT_GET_SUMMARY") return Promise.resolve(getSummary());
+    if (message.type === "OMNICHAT_CANCEL") {state.cancelled=true;return Promise.resolve({ok:true});}
+    if (message.type === "OMNICHAT_GET_SUMMARY") {ensureCurrentConversation();return Promise.resolve(getSummary());}
     if (message.type === "OMNICHAT_EXPORT") return performExport(message.options || {});
     return undefined;
   });

@@ -87,6 +87,7 @@ async function startExport() {
 document.addEventListener("DOMContentLoaded", async () => {
   await restoreOptions();
   await refreshSummary();
+  $("cancel").addEventListener("click", async()=>{try{await send({type:"OMNICHAT_CANCEL"});setStatus("Cancelación solicitada.");}catch(e){setStatus(String(e.message||e),true);}});
   $("refresh").addEventListener("click", refreshSummary);
   $("export").addEventListener("click", startExport);
   for (const id of optionIds) {

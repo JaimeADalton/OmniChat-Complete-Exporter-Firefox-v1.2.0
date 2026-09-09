@@ -1,32 +1,12 @@
-OMNICHAT COMPLETE EXPORTER 1.2.0 — INSTALACIÓN EN FIREFOX
+OMNICHAT COMPLETE EXPORTER 1.3.0 — INSTALACIÓN TEMPORAL
 
-PRUEBA INMEDIATA (sin firma):
-1. Descomprime el archivo ZIP.
-2. Escribe about:debugging en la barra de direcciones.
-3. Pulsa "Este Firefox".
-4. Pulsa "Cargar complemento temporal...".
-5. Selecciona manifest.json de la carpeta descomprimida.
-6. Vuelve a la conversación de ChatGPT/Claude y RECARGA la pestaña.
-7. Pulsa el icono de la extensión.
-8. Para máxima cobertura, deja activadas todas las casillas y "ZIP completo".
-9. Pulsa "Exportar conversación".
+1. Abre about:debugging en Firefox y entra en Este Firefox.
+2. Quita la versión anterior de OmniChat.
+3. Descomprime el ZIP nuevo en una carpeta distinta.
+4. Pulsa Cargar complemento temporal y selecciona manifest.json.
+5. Recarga completamente la pestaña de la conversación.
+6. Abre OmniChat y exporta como ZIP completo.
 
-MEJORAS 1.2.0:
-- Ejecuciones reales agrupadas como herramienta + comando + salida.
-- Los ejemplos bash/python de una respuesta ya no se cuentan como comandos ejecutados.
-- Detección de tarjetas de archivos y artefactos sin href.
-- Resolución local selectiva de adjuntos visibles de ChatGPT cuando el backend los permite.
-- Varias capturas visuales para turnos largos, con presupuesto repartido.
-- Menos ruido de acciones de interfaz en las actividades.
-- source-layer.json dentro del ZIP.
-
-IMPORTANTE:
-- El complemento temporal desaparece cuando reinicias Firefox.
-- Firefox Release/Beta exige firma de Mozilla para una instalación permanente normal.
-- El paquete .xpi incluido está SIN FIRMAR y se entrega como paquete de desarrollo/fuente.
-
-PRIVACIDAD:
-- No hay telemetría ni backend propio.
-- No se sube la conversación a terceros.
-- La extensión no usa el portapapeles.
-- El token de sesión de ChatGPT, si se consulta para resolver un archivo visible, solo vive en memoria y no se exporta.
+No instales el ZIP de conversación reparada como extensión: es un documento de consulta.
+El archivo XPI es un paquete de desarrollo SIN FIRMA. La carga temporal dura hasta reiniciar Firefox. La instalación permanente normal requiere firma de Mozilla.
+Los archivos sin copia local y las capturas limitadas se señalan en el informe. Mantén la pestaña de la conversación activa durante las capturas visuales.

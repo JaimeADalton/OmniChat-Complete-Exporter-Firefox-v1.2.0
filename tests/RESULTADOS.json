@@ -1,0 +1,56 @@
+{
+  "environment": "Chromium local through Playwright; website navigation disabled; APIs mocked",
+  "firefox_live_test": false,
+  "authenticated_chatgpt_test": false,
+  "tests": [
+    {
+      "test": "Saved real DOM: 8 turns, 22 bounded execution panels, zero executions in first explanatory answer",
+      "result": "passed"
+    },
+    {
+      "test": "Saved real DOM: preformatted source whitespace preserved byte-for-character",
+      "result": "passed"
+    },
+    {
+      "test": "GitHub blob pages retained as links, not treated as downloadable attachments",
+      "result": "passed"
+    },
+    {
+      "test": "Mixed article/section discovery and exact Python indentation",
+      "result": "passed"
+    },
+    {
+      "test": "Zero Copy clicks; legitimate activity title containing copy opens and restores",
+      "result": "passed"
+    },
+    {
+      "test": "Cross-realm Uint8Array, DataView offsets, UTF-8 and ZIP extraction byte checks; unknown data types rejected",
+      "result": "passed"
+    },
+    {
+      "test": "Signed URL parameter redaction and active markup/password removal",
+      "result": "passed"
+    },
+    {
+      "test": "Mock API: balanced sandbox filename, exact visible-label match, no stored session token, failure reported as partial",
+      "result": "passed"
+    },
+    {
+      "test": "Virtualized mixed shells: 6 turns with one mounted; cancellation stops scan",
+      "result": "passed"
+    },
+    {
+      "test": "Node native WebCrypto and JS ZIP on four original resources plus UTF-8 text; all hashes and extracted bytes checked in Python",
+      "result": "passed"
+    },
+    {
+      "test": "Full ZIP export with mocked browser/network APIs; 11 entry hashes verified, UTF-8 file recovered, test signature absent from generated metadata",
+      "result": "passed"
+    }
+  ],
+  "notes": [
+    "No integration test in Firefox or an authenticated user session.",
+    "The about:blank browser used mocked digest; native digest was tested independently with Node WebCrypto.",
+    "Source DOM data and personal attachments are not bundled with this extension."
+  ]
+}
