@@ -1,56 +1,141 @@
 {
-  "environment": "Chromium local through Playwright; website navigation disabled; APIs mocked",
-  "firefox_live_test": false,
+  "version": "1.3.1",
+  "firefox_integration_test": false,
   "authenticated_chatgpt_test": false,
-  "tests": [
+  "authenticated_claude_test": false,
+  "original_user_error_stack_available": false,
+  "diagnosis": "Ruta compatible con el error aproximado del usuario; la causa exacta en Firefox no está confirmada.",
+  "passed_cases": 21,
+  "permissions_changed": false,
+  "suites": [
     {
-      "test": "Saved real DOM: 8 turns, 22 bounded execution panels, zero executions in first explanatory answer",
-      "result": "passed"
+      "version": "1.3.1",
+      "environment": "v22.16.0 / Node vm isolated contexts + native WebCrypto and Blob",
+      "firefox_live_test": false,
+      "authenticated_chatgpt_test": false,
+      "error_reproduction": "Simulated denied constructor getter, not a Firefox Xray implementation",
+      "tests": [
+        {
+          "test": "The 1.3.0 normalization expression throws the reported constructor error under a denied getter",
+          "result": "passed"
+        },
+        {
+          "test": "The new byte copy works with denied constructor lookups and foreign-realm input",
+          "result": "passed"
+        },
+        {
+          "test": "DataView offsets, typed-array offsets and ArrayBuffer copies are exact and independent",
+          "result": "passed"
+        },
+        {
+          "test": "TextEncoder foreign-realm UTF-8 output, empty inputs and invalid type rejection",
+          "result": "passed"
+        },
+        {
+          "test": "SHA-256 matches native Node crypto with denied constructor lookups",
+          "result": "passed"
+        },
+        {
+          "test": "Resource signature validation and base64 round trip do not use typed-array subarray",
+          "result": "passed"
+        },
+        {
+          "test": "Normalization, hashes and ZIP also tolerate denied ArrayBuffer constructor access",
+          "result": "passed"
+        },
+        {
+          "test": "Preflight covers bytes, offsets, real WebCrypto SHA, ZIP and Blob round trip",
+          "result": "passed"
+        },
+        {
+          "test": "ZIP assembly with foreign binary, DataView and Unicode; entries carry independent SHA-256",
+          "result": "passed"
+        },
+        {
+          "test": "Failure diagnostic preserves stage and source line, omits URLs and bearer values, and persists locally",
+          "result": "passed"
+        }
+      ]
     },
     {
-      "test": "Saved real DOM: preformatted source whitespace preserved byte-for-character",
-      "result": "passed"
+      "version": "1.3.1",
+      "environment": "Chromium 144.0.7559.96 via Playwright on about:blank, native Blob, Python hashlib digest bridge; network blocked",
+      "firefox_live_test": false,
+      "authenticated_chatgpt_test": false,
+      "mocked": "browser.runtime, storage, downloads, location and WebCrypto bridge; denied constructor getters simulate the reported failure; no Firefox Xray implementation",
+      "tests": [
+        {
+          "test": "Full 1.3.0 ZIP export fails under simulated denied constructor access",
+          "result": "passed",
+          "error": "Permission denied to access property \"constructor\""
+        },
+        {
+          "test": "Full ZIP export with native browser Blob, hashlib digest bridge and both constructor guards",
+          "result": "passed",
+          "hashed_entries": 13
+        },
+        {
+          "test": "Copy button receives zero clicks; native disclosure is restored",
+          "result": "passed"
+        },
+        {
+          "test": "HTML export succeeds with denied constructor lookups",
+          "result": "passed"
+        },
+        {
+          "test": "JSON export succeeds with denied constructor lookups",
+          "result": "passed"
+        },
+        {
+          "test": "MARKDOWN export succeeds with denied constructor lookups",
+          "result": "passed"
+        },
+        {
+          "test": "Preflight failure records phase/stack in local storage and leaves the error visible",
+          "result": "passed"
+        },
+        {
+          "test": "Actual saved user DOM: 8 turns and 22 tool panels; the first explanatory answer is not classified as execution",
+          "result": "passed"
+        }
+      ]
     },
     {
-      "test": "GitHub blob pages retained as links, not treated as downloadable attachments",
-      "result": "passed"
-    },
-    {
-      "test": "Mixed article/section discovery and exact Python indentation",
-      "result": "passed"
-    },
-    {
-      "test": "Zero Copy clicks; legitimate activity title containing copy opens and restores",
-      "result": "passed"
-    },
-    {
-      "test": "Cross-realm Uint8Array, DataView offsets, UTF-8 and ZIP extraction byte checks; unknown data types rejected",
-      "result": "passed"
-    },
-    {
-      "test": "Signed URL parameter redaction and active markup/password removal",
-      "result": "passed"
-    },
-    {
-      "test": "Mock API: balanced sandbox filename, exact visible-label match, no stored session token, failure reported as partial",
-      "result": "passed"
-    },
-    {
-      "test": "Virtualized mixed shells: 6 turns with one mounted; cancellation stops scan",
-      "result": "passed"
-    },
-    {
-      "test": "Node native WebCrypto and JS ZIP on four original resources plus UTF-8 text; all hashes and extracted bytes checked in Python",
-      "result": "passed"
-    },
-    {
-      "test": "Full ZIP export with mocked browser/network APIs; 11 entry hashes verified, UTF-8 file recovered, test signature absent from generated metadata",
-      "result": "passed"
+      "version": "1.3.1",
+      "environment": "Chromium popup DOM, browser APIs simulated",
+      "firefox_live_test": false,
+      "tests": [
+        {
+          "test": "Outdated content script disables export and asks for page reload",
+          "result": "passed"
+        },
+        {
+          "test": "Diagnostic persists across popup reopening and downloads as JSON from popup Blob",
+          "result": "passed"
+        },
+        {
+          "test": "New version exports, displays failure phase and leaves diagnosis available",
+          "result": "passed"
+        }
+      ]
     }
   ],
-  "notes": [
-    "No integration test in Firefox or an authenticated user session.",
-    "The about:blank browser used mocked digest; native digest was tested independently with Node WebCrypto.",
-    "Source DOM data and personal attachments are not bundled with this extension."
+  "independent_zip_checks": [
+    {
+      "file": "binary-regression.zip",
+      "sha256_entries_checked": 3,
+      "crc_valid": true
+    },
+    {
+      "file": "browser-fixture.zip",
+      "sha256_entries_checked": 13,
+      "crc_valid": true
+    }
+  ],
+  "limitations": [
+    "El getter denegado es una simulación; no reproduce toda la implementación Xray.",
+    "Chromium usa about:blank con ubicación y APIs simuladas; digest por puente a hashlib, Blob nativo.",
+    "Node utiliza WebCrypto nativo y contextos VM independientes.",
+    "Las pruebas no certifican exhaustividad de conversaciones, disponibilidad de adjuntos ni descargas en la sesión real."
   ]
 }

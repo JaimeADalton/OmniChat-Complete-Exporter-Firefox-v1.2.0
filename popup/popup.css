@@ -28,3 +28,8 @@ button:disabled { opacity: .55; cursor: default; }
 .secondary { background: color-mix(in srgb, CanvasText 10%, transparent); color: CanvasText; }
 .status { min-height: 16px; margin: 8px 2px 0; font-size: 11px; line-height: 1.35; opacity: .82; }
 .status.error { color: #c33; opacity: 1; }
+
+.actions { grid-template-columns: 1fr 1fr; }
+.actions .primary { grid-column: 1 / -1; }
+.diagnostic { width: 100%; margin-top: 9px; }
+[hidden] { display: none !important; }

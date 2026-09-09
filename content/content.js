@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.3.0";
+  const VERSION = "1.3.1";
   const SCHEMA_VERSION = "1.3";
   const MAX_LIVE_EVENTS = 1000;
   const MAX_SCAN_STEPS = 320;
@@ -10,6 +10,12 @@
   const MAX_VISUAL_TILES_PER_TURN = 12;
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const encoder = new TextEncoder();
+  // Use this content script's native binary constructors. Never waive Firefox's
+  // Xray protection or borrow constructors from window.wrappedJSObject.
+  const Uint8Array = globalThis.Uint8Array;
+  const Uint32Array = globalThis.Uint32Array;
+  const ArrayBuffer = globalThis.ArrayBuffer;
+  const DataView = globalThis.DataView;
 
   const state = {
     weakIds: new WeakMap(),
@@ -24,7 +30,9 @@
     cancelled: false,
     navigationKey: location.origin + location.pathname,
     visualCoverage: [],
-    diagnostics: []
+    diagnostics: [],
+    phase: "idle",
+    lastFailure: null
   };
 
   function hashString(input) {
@@ -95,16 +103,84 @@
   }
 
   function normalizedBytes(value) {
-    if (typeof value === 'string') return encoder.encode(value);
-    // instanceof Uint8Array is NOT a cross-realm byte test.
-    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
-    if (Object.prototype.toString.call(value) === '[object ArrayBuffer]') return new Uint8Array(value).slice();
-    throw new TypeError('Se rechazó un recurso que no es texto ni un búfer binario. No se convierte a String.');
+    // TextEncoder, streams and runtime messages can return foreign-realm views.
+    // TypedArray.slice/subarray consult constructor[Symbol.species]; Firefox can
+    // deny that access across compartments. Allocate explicitly and copy instead.
+    const source = typeof value === "string" ? encoder.encode(value) : value;
+    let view;
+    if (ArrayBuffer.isView(source)) {
+      view = new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+    } else if (Object.prototype.toString.call(source) === "[object ArrayBuffer]") {
+      view = new Uint8Array(source);
+    } else {
+      throw new TypeError("Se rechazó un recurso que no es texto ni un búfer binario. No se convierte a String.");
+    }
+    const result = new Uint8Array(view.byteLength);
+    // set() copies into the explicitly allocated array, without species lookup.
+    result.set(view);
+    return result;
   }
 
   async function sha256Bytes(value) {
-    const digest = await crypto.subtle.digest('SHA-256', normalizedBytes(value));
-    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+    const digest = await crypto.subtle.digest("SHA-256", normalizedBytes(value));
+    const bytes = normalizedBytes(digest);
+    let hex = "";
+    for (let i = 0; i < bytes.length; i += 1) hex += bytes[i].toString(16).padStart(2, "0");
+    return hex;
+  }
+
+  async function binaryPreflight() {
+    // Detect a broken byte/hash/ZIP/Blob path BEFORE scrolling a long chat.
+    const text = normalizedBytes("abc");
+    if (text.length !== 3 || text[0] !== 97 || text[2] !== 99) throw new Error("La copia binaria UTF-8 no conserva los bytes.");
+    const offset = new DataView(text.buffer, 1, 1);
+    const copied = normalizedBytes(offset);
+    if (copied.length !== 1 || copied[0] !== 98) throw new Error("La copia binaria no conserva el rango del búfer.");
+    const digest = await sha256Bytes(text);
+    if (digest !== "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") {
+      throw new Error("La comprobación SHA-256 del navegador falló.");
+    }
+    const zip = createZip([{ name: "probe.txt", data: text }]);
+    if (zip[0] !== 80 || zip[1] !== 75) throw new Error("La comprobación ZIP del navegador falló.");
+    const blob = new Blob([zip], { type: "application/zip" });
+    if (blob.size !== zip.byteLength) throw new Error("La creación del archivo binario cambió su tamaño.");
+    const restored = normalizedBytes(await blob.arrayBuffer());
+    if (restored.length !== zip.length || await sha256Bytes(restored) !== await sha256Bytes(zip)) {
+      throw new Error("La creación del archivo binario cambió sus bytes.");
+    }
+    return { kind: "binary-preflight", version: VERSION, result: "passed", utf8: true, viewOffsets: true, sha256: true, zip: true, blob: true };
+  }
+
+  function diagnosticText(value, limit) {
+    // Retain extension source filenames/line numbers, not visited URLs or tokens.
+    return String(value || "")
+      .replace(/moz-extension:\/\/[^/\s]+/gi, "moz-extension://EXTENSION")
+      .replace(/(?:https?:|blob:|data:)[^\s<>"']+/gi, "[URL omitida]")
+      .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [omitido]")
+      .replace(/((?:access[_-]?token|refresh[_-]?token|token|signature|sig|api[_-]?key)\s*[=:]\s*)[^\s&;,"']+/gi, "$1[omitido]")
+      .slice(0, limit);
+  }
+
+  function recordExportFailure(error, options) {
+    const read = (key, fallback) => { try { return error?.[key] || fallback; } catch { return fallback; } };
+    const report = {
+      version: VERSION,
+      timestamp: new Date().toISOString(),
+      platform: platformInfo().id,
+      phase: state.phase,
+      format: options?.format || "unknown",
+      name: diagnosticText(read("name", "Error"), 80),
+      message: diagnosticText(read("message", "Error sin mensaje disponible"), 2000),
+      stack: diagnosticText(read("stack", "Pila no disponible"), 6000),
+      capturedScreenshots: state.visualSnapshots.length,
+      browserUserAgent: diagnosticText(navigator.userAgent, 300),
+      privacy: "No incluye el volcado de la conversación. Revisa el mensaje y la pila antes de compartir."
+    };
+    state.lastFailure = report;
+    // Persist only the last diagnostic, so closing the popup does not lose it.
+    try { browser.storage.local.set({ omnichatLastError: report }).catch(() => {}); } catch { /* optional */ }
+    console.error("OmniChat: fallo de exportación", report);
+    return report;
   }
 
   function ensureCurrentConversation() {
@@ -1228,7 +1304,11 @@
       media,
       files,
       expandables,
-      liveEvents: state.liveLog.length
+      liveEvents: state.liveLog.length,
+      version: VERSION,
+      exporting: state.exporting,
+      phase: state.phase,
+      lastFailure: state.lastFailure
     };
   }
 
@@ -1739,7 +1819,8 @@
 
   function validateResource(bytes,mime,name,expectedSize) {
     if(expectedSize && bytes.byteLength!==expectedSize) throw new Error(`Tamaño inesperado: ${bytes.byteLength}, esperado ${expectedSize}`);
-    const head=Array.from(bytes.subarray(0,8));
+    const head=[];
+    for(let i=0;i<Math.min(8,bytes.length);i+=1) head.push(bytes[i]);
     if(/\.png$/i.test(name) && head.join(',')!=='137,80,78,71,13,10,26,10') throw new Error('El recurso no contiene una cabecera PNG válida');
     if(/\.(?:zip|xpi|docx|xlsx|pptx)$/i.test(name) && !(head[0]===80 && head[1]===75 && [3,5,7].includes(head[2]))) throw new Error('El recurso no contiene una cabecera ZIP válida');
     if(/\.jpe?g$/i.test(name) && !(head[0]===255 && head[1]===216 && head[2]===255)) throw new Error('El recurso no contiene una cabecera JPEG válida');
@@ -1823,7 +1904,11 @@
     let binary = "";
     const chunk = 0x8000;
     for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+      // Use a plain, locally-created array: no TypedArray.subarray / species.
+      const end = Math.min(i + chunk, bytes.length);
+      const codes = [];
+      for (let j = i; j < end; j += 1) codes.push(bytes[j]);
+      binary += String.fromCharCode(...codes);
     }
     return `data:${mime || "application/octet-stream"};base64,${btoa(binary)}`;
   }
@@ -2138,7 +2223,7 @@
     let offset = 0;
     const dt = dosDateTime(new Date());
     for (const file of files) {
-      const nameBytes = encoder.encode(file.name);
+      const nameBytes = normalizedBytes(file.name);
       const data = normalizedBytes(file.data);
       if(data.byteLength>0xffffffff || offset+data.byteLength>0xffffffff) throw new Error("El ZIP supera el límite ZIP32.");
       if(!file.name || file.name.startsWith("/") || file.name.split("/").includes("..")) throw new Error("Nombre ZIP no válido.");
@@ -2166,6 +2251,7 @@
 
   async function downloadBlob(blob, filename) {
     checkCancelled();
+    state.phase = "download";
     const url = URL.createObjectURL(blob);
     try {
       const result = await browser.runtime.sendMessage({ type: "OMNICHAT_DOWNLOAD_URL", url, filename });
@@ -2197,6 +2283,7 @@
     if (state.exporting) throw new Error("Ya hay una exportación en curso.");
     state.exporting = true;
     state.cancelled = false;
+    state.phase = "prepare";
     state.visualCoverage = [];
     state.visualSnapshots = [];
     state.diagnostics = [{
@@ -2222,15 +2309,22 @@
     };
     const warnings = [];
     try {
+      state.phase = "binary_preflight";
+      toast("OmniChat: comprobando compatibilidad", "Verificando bytes, SHA-256, ZIP y Blob…");
+      state.diagnostics.push(await binaryPreflight());
+      checkCancelled();
+      state.phase = "capture";
       toast("OmniChat: preparando exportación", "Detectando conversación…");
       let turns;
       const initialScroller=findScrollContainer(), initialTop=initialScroller.scrollTop;
       try {turns = await deepCapture(options, warnings);} finally {setScrollTop(initialScroller,initialTop);}
       if (!turns.length) throw new Error("No se detectaron turnos de conversación en esta página.");
 
+      state.phase = "resolve_files";
       toast("OmniChat: resolviendo adjuntos", "Buscando referencias visibles de archivos…");
       const sourceLayer = await enrichChatGptVisibleFiles(turns, options, warnings);
 
+      state.phase = "archive_resources";
       const resourceInfo = (options.archiveAssets || options.archiveFiles)
         ? await archiveResources(turns, options, warnings)
         : { archived: new Map(), totalBytes: 0, requested: 0 };
@@ -2243,6 +2337,7 @@
           if(!res) warnings.push(`Archivo sin copia local: ${file.downloadName||file.text||'sin nombre'} (${file.archiveStatus}).`);
         }
       }
+      state.phase = "build_documents";
       const conversation = buildConversationObject(turns, options, resourceInfo, warnings, sourceLayer);
       const base = exportBaseName();
       toast("OmniChat: generando archivo", `${conversation.summary.turns} turnos · ${conversation.summary.codeBlocks} bloques de código`);
@@ -2279,6 +2374,7 @@
           }
         }
         for (const res of resourceInfo.archived.values()) files.push({ name: res.localPath, data: res.bytes });
+        state.phase = "integrity";
         const integrity=[];
         for(const file of files) {
           checkCancelled();
@@ -2287,6 +2383,7 @@
         }
         files.push({name:'integrity.json',data:JSON.stringify({algorithm:'SHA-256',scope:'all_other_entries_except_integrity_and_SHA256SUMS',entries:integrity},null,2)});
         files.push({name:'SHA256SUMS.txt',data:integrity.map(e=>`${e.sha256}  ${e.path}`).join('\n')+'\n'});
+        state.phase = "zip";
         const zipBytes = createZip(files);
         filename = `${base}.zip`;
         await downloadBlob(new Blob([zipBytes], { type: "application/zip" }), filename);
@@ -2302,13 +2399,16 @@
         await downloadBlob(new Blob([buildMarkdown(conversation, resourceInfo.archived, false)], { type: "text/markdown;charset=utf-8" }), filename);
       }
 
+      state.phase = "done";
       toast("OmniChat: exportación terminada", `${filename}${warnings.length ? ` · ${warnings.length} advertencias en el informe` : ""}`);
       hideToast(3500);
       return { ok: true, filename, warnings: warnings.length, summary: conversation.summary };
     } catch (error) {
-      toast("OmniChat: error de exportación", error.message || String(error));
-      hideToast(6000);
-      return { ok: false, error: error.message || String(error) };
+      const diagnostic = recordExportFailure(error, options);
+      const summary = `[${diagnostic.phase}] ${diagnostic.message}`;
+      toast("OmniChat: error de exportación", `${summary} · Abre la extensión para descargar el diagnóstico.`);
+      // Keep this visible. The old six-second toast lost the exact error text.
+      return { ok: false, error: summary, diagnostic };
     } finally {
       state.exporting = false;
     }
@@ -2408,6 +2508,7 @@
 
   browser.runtime.onMessage.addListener((message) => {
     if (!message || typeof message !== "object") return undefined;
+    if (message.type === "OMNICHAT_GET_LAST_ERROR") return Promise.resolve({ ok: true, diagnostic: state.lastFailure });
     if (message.type === "OMNICHAT_CANCEL") {state.cancelled=true;return Promise.resolve({ok:true});}
     if (message.type === "OMNICHAT_GET_SUMMARY") {ensureCurrentConversation();return Promise.resolve(getSummary());}
     if (message.type === "OMNICHAT_EXPORT") return performExport(message.options || {});
